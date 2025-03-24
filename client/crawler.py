@@ -125,8 +125,13 @@ class Crawler:
         driver = webdriver.Firefox(options=options)
         driver.get(url)
         page_source = driver.page_source
+
+        cookies = {cookie['name']: cookie['value'] for cookie in driver.get_cookies()}
+        response = requests.get(url, cookies=cookies)
+        status_code = response.status_code
         driver.close()
-        return page_source
+
+        return page_source, status_code
 
     def determine_page_type(self, url):
         url = url.lower()
@@ -136,9 +141,15 @@ class Crawler:
         elif url.endswith(".pdf"):
             return "PDF"
         elif url.endswith(".jpg") or url.endswith(".jpeg") or url.endswith(".png"):
-            return "Image"
-        elif url.endswith(".doc") or url.endswith(".docx") or url.endswith(".ppt") or url.endswith(".pptx"):
-            return "Document"
+            return "BINARY"
+        elif url.endswith(".doc"):
+            return "DOC"
+        elif url.endswith(".docx"):
+            return "DOCX"
+        elif url.endswith(".ppt"):
+            return "PPT"
+        elif url.endswith(".pptx"):
+            return "PPTX"
         else:
             return "Unknown"
 
@@ -230,7 +241,9 @@ class Crawler:
                 break
 
             try:
-                url = frontier.get(timeout=3)
+                frontier_response = requests.get("http://localhost:8000/frontier").json()
+                page_id = frontier_response["id"]
+                url = frontier_response["url"]
             except:
                 print("Frontier is empty.")
                 break
@@ -242,9 +255,13 @@ class Crawler:
             if self.page_type_html(url) == "HTML":
 
                 print(f"Fetching: {url}")
-                html = self.fetch(url)
+                html, status_code = self.fetch(url)
                 page_hash = self.hash_html(html)
-                ##page_type = self.determine_page_type(url)
+                try:
+                    requests.put("http://localhost:8000/page/" + str(page_id), json={"page_type_code": "HTML", "html_content": html, "http_status_code": status_code})
+                except Exception as e:
+                    print(f"Error while updating page: {e}")
+                    continue
                 links = self.extract_links(url, html)
                 images = self.extract_images(url, html)
 
@@ -256,7 +273,8 @@ class Crawler:
 
                 for link in links:
                     if self.determine_page_type(link) in ("HTML", "Unknown") and self.is_allowed(link):
-                        frontier.put(link)
+                        #frontier.put(link)
+                        requests.post("http://localhost:8000/page/frontier", json={"site_url": domain, "url": link})
 
     def run(self, num_workers=2):
         args = (self.frontier, self.last_access_times, self.last_access_ips, self.parsed_urls, self.stop_event)
