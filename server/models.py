@@ -32,6 +32,7 @@ class Page(Base):
     http_status_code = Column(Integer)
     accessed_time = Column(TIMESTAMP)
     accessed_ip = Column(String(16))
+    relevance = Column(Integer)
 
 class PageData(Base):
     __tablename__ = "page_data"

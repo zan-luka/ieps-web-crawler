@@ -118,26 +118,38 @@ def create_pages_frontier():
     db = SessionLocal()
     try:
         data = request.get_json()
-        site_id = 3
-        if site_id is None:
-            return jsonify({"error": "Site not found"}), 404
 
-        # Filter links to only keep those from "slo-tech.com"
-        valid_links = [link for link in data["links"] if get_domain(link) == "slo-tech.com"]
-
-        if not valid_links:
-            return jsonify({"status": "no valid links"}), 200
-
-        # Prepare batch insert
+        links = data["links"]
+        # Prepare batch insert into Page table
         stmt = insert(models.Page).values([
-            {"site_id": site_id, "page_type_code": "FRONTIER", "url": link}
-            for link in valid_links
+            {"site_id": None, "page_type_code": "FRONTIER", "url": link["url"], "relevance": link["relevance"]}
+            for link in links
         ]).on_conflict_do_nothing(index_elements=["url"])  # Ignore duplicates
 
         db.execute(stmt)  # Execute batch insert
         db.commit()
 
-        return jsonify({"status": "success", "inserted": len(valid_links)})
+        # Get ID-s for inserted pages
+        from_page_id = data.get("from_page_id")
+
+        urls = [link["url"] for link in links]
+        pages = db.execute(
+            select(models.Page.id, models.Page.url).where(models.Page.url.in_(urls))
+        ).fetchall()
+
+        url_to_id = {page.url: page.id for page in pages}
+
+        # Insert into Link table
+        if from_page_id is not None:
+            link_stmt = insert(models.Link).values([
+                {"from_page": from_page_id, "to_page": url_to_id[link["url"]]}
+                for link in links
+                if link["url"] in url_to_id
+            ]).on_conflict_do_nothing(index_elements=["from_page", "to_page"])
+            db.execute(link_stmt)
+
+        db.commit()
+        return jsonify({"status": "success", "inserted": len(data["links"])})
 
     except Exception as e:
         db.rollback()
@@ -159,6 +171,10 @@ def update_page(page_id):
         existing_page.http_status_code = data["http_status_code"]
         existing_page.accessed_time = datetime.datetime.utcnow()
         existing_page.accessed_ip = data["accessed_ip"]
+
+        if "site_id" in data:
+            existing_page.site_id = data["site_id"]
+
         if data["page_type_code"] == 'HTML':
             existing_page.html_content = data["html_content"]
         else:
@@ -239,12 +255,12 @@ def list_frontier_urls():
     db = SessionLocal()
     try:
         results = db.execute(
-            select(models.Page.id, models.Page.url).where(models.Page.page_type_code == "FRONTIER")
-        ).fetchall()
+            select(models.Page.id, models.Page.url).where(models.Page.page_type_code == "FRONTIER").order_by(models.Page.relevance.desc())
+            .limit(1)
+        ).fetchone()
 
-        # TODO PREFERENTIAL LOGIC
-        selected_row_id = results[0].id
-        selected_row_url = results[0].url
+        selected_row_id = results.id
+        selected_row_url = results.url
 
         # update page type to "CRAWLED"
         db.execute(
@@ -256,6 +272,36 @@ def list_frontier_urls():
         return jsonify({"id": selected_row_id, "url": selected_row_url})
     except Exception as e:
         logger.error(f'Error /frontier-urls: {e}')
+        return jsonify({"error": str(e)}), 500
+    finally:
+        db.close()
+
+@app.route("/page/html-count", methods=["GET"])
+def count_html_pages():
+    db = SessionLocal()
+    try:
+        result = db.execute(
+            text("SELECT COUNT(*) FROM crawldb.page WHERE page_type_code = 'HTML';")
+        )
+        count = result.scalar()
+        return jsonify({"html_page_count": count})
+    except Exception as e:
+        logger.error(f'Error /page/html-count: {e}')
+        return jsonify({"error": str(e)}), 500
+    finally:
+        db.close()
+
+@app.route("/site/exists", methods=["GET"])
+def site_exists():
+    db = SessionLocal()
+    try:
+        domain = request.args.get("domain")
+        site = db.query(models.Site).filter(models.Site.domain == domain).first()
+        if site:
+            return jsonify({"exists": True, "site_id": site.id})
+        else:
+            return jsonify({"exists": False})
+    except Exception as e:
         return jsonify({"error": str(e)}), 500
     finally:
         db.close()
