@@ -20,21 +20,17 @@ class Crawler:
         self.user_agent = "fri-wier-skupina_n"
         self.hostname = socket.gethostname()
         self.ip_address = socket.gethostbyname(self.hostname)
-        self.frontier = multiprocessing.Queue()
+
         seed_url = "https://slo-tech.com/"
-        self.frontier.put(seed_url)
+        response = requests.post("http://localhost:5000/page/frontierlinks", json={"from_page_id": None,
+                                                                                   "links": [{"url": seed_url, "relevance": 3}]})
 
         manager = multiprocessing.Manager()
         self.stop_event = manager.Event()
 
-        # Robots.txt for each domain
-        self.robot_parsers = {}
+        self.max_pages = 1
 
-        ## TO DO: read parsed_urls and last access from database?
-        self.last_access_times = manager.dict()
-        self.last_access_ips = manager.dict()
-        self.max_pages = 2
-
+    """
     def get_robot_parser(self, domain):
 
         if domain not in self.robot_parsers:
@@ -97,6 +93,7 @@ class Crawler:
         last_access_times[domain] = time.time()
         if ip:
             last_access_ips[ip] = time.time()
+    """
 
     def is_allowed(self, url):
         domain = "{0.scheme}://{0.netloc}".format(urlsplit(url))
@@ -109,18 +106,81 @@ class Crawler:
 
     def parse_sitemap(self, sitemap_url):
         try:
-            response = requests.get(sitemap_url)
+            response = requests.get(sitemap_url, timeout=5)
             response.raise_for_status()
             root = ET.fromstring(response.content)
-            urls = []
-
-            for url in root.findall(".//{http://www.sitemaps.org/schemas/sitemap/0.9}loc"):
-                url_text = url.text.strip()
-                urls.append(url_text)
-            return urls
+            return [url.text.strip() for url in root.findall(".//{http://www.sitemaps.org/schemas/sitemap/0.9}loc")]
         except Exception as e:
-            print(f"Error while reading sitemap: {sitemap_url}: {e}")
+            print(f"[ERROR] Failed to parse sitemap {sitemap_url}: {e}")
             return []
+
+    def get_robots_txt(self, domain):
+        robots_url = f"https://{domain}/robots.txt"
+        try:
+            return requests.get(robots_url, timeout=5).text
+        except Exception as e:
+            print(f"[ERROR] Failed to fetch robots.txt for {domain}: {e}")
+            return None
+
+    def extract_and_enqueue_sitemap_links(self, rp, domain, page_id):
+        sitemaps = rp.site_maps()
+        if not sitemaps:
+            return ""
+
+        sitemap_content = ""
+        for sitemap_url in sitemaps:
+            urls = self.parse_sitemap(sitemap_url)
+            for url in urls:
+                sitemap_content += url + "\n"
+                #if self.is_allowed(url):
+                normalized_urls = self.normalize_url(domain, url)
+                try:
+                    requests.post("http://localhost:5000/page/frontierlinks", json={
+                        "from_page_id": page_id,
+                        "links": [{"url": norm_url, "relevance": 3} for norm_url in normalized_urls]
+                    })
+                except Exception as e:
+                    print(f"[ERROR] Failed to enqueue links from sitemap: {e}")
+
+
+    def get_or_create_site(self, domain, page_id):
+        # Check if site already exists
+        try:
+            response = requests.get("http://localhost:5000/site/exists", params={"domain": domain})
+            response.raise_for_status()
+            data = response.json()
+            if data.get("exists"):
+                return data["site_id"]
+        except Exception as e:
+            print(f"[ERROR] Site existence check failed for {domain}: {e}")
+            return None
+
+        # Fetch robots.txt
+        robots_content = self.get_robots_txt(domain)
+        sitemap_content = None
+
+        # If robots.txt is available, parse it and process sitemaps
+        if robots_content:
+            rp = RobotFileParser()
+            rp.parse(robots_content.splitlines())
+            sitemap_content = self.extract_and_enqueue_sitemap_links(rp, domain, page_id)
+
+        # Create the site in the DB
+        try:
+            response = requests.post("http://localhost:5000/site", json={
+                "domain": domain,
+                "robots_content": robots_content,
+                "sitemap_content": sitemap_content
+            })
+            response.raise_for_status()
+            return response.json()["id"]
+        except Exception as e:
+            print(f"[ERROR] Failed to create site {domain}: {e}")
+            return None
+
+        except Exception as e:
+            print(f"Napaka pri get_or_create_site: {e}")
+            return None
 
     def select_content_type(self, content_type):
         if "text/html" in content_type:
@@ -241,6 +301,20 @@ class Crawler:
         # Correctly extend relative links
         images = self.normalize_url(url, images)
         return images
+    
+    def check_relevance(self, links):
+        relevant_links = []
+
+        for link in links:
+            relevance = 0
+            link_domain = self.get_domain(link)
+            if link_domain == "slo-tech.com":
+                relevance += 1
+            if any(keyword in link for keyword in ("novice", "forum", "clanki")):
+                relevance += 1
+
+            relevant_links.append((link, relevance))
+        return relevant_links
 
 
     def hash_html(self, html_content):
@@ -251,11 +325,17 @@ class Crawler:
         domain = parsed_url.netloc
         return domain
 
-
-    def worker(self, frontier, last_access_time, last_access_ips, stop_event):
+    def worker(self, stop_event):
         """Worker function for processes."""
 
         while not stop_event.is_set():
+            html_response = requests.get("http://localhost:5000/page/html-count").json()
+            html_count = html_response["html_page_count"]
+            if html_count > self.max_pages:
+                print(f"[{multiprocessing.current_process().name}] {self.max_pages} pages have been retrieved.")
+                stop_event.set()
+                break
+
             try:
                 frontier_response = requests.get("http://localhost:5000/frontier").json()
                 page_id = frontier_response["id"]
@@ -266,6 +346,7 @@ class Crawler:
             
             print(f"Crawling URL: {url}")
             domain = self.get_domain(url)
+            site_id = self.get_or_create_site(domain, page_id)
 
             delay = requests.post("http://localhost:5000/site/delay", json={"site_url": domain, "ip": self.ip_address}).json()
             print(f"Delay: {delay['delay']}")
@@ -291,8 +372,8 @@ class Crawler:
 
             try:
                 requests.put("http://localhost:5000/page/" + str(page_id),
-                             json={"page_type_code": "HTML", "html_content": html, "http_status_code": status_code,
-                                   "accessed_ip": self.ip_address})
+                             json={"page_type_code": content_type, "html_content": html, "http_status_code": status_code,
+                                   "accessed_ip": self.ip_address, "site_id": site_id})
             except Exception as e:
                 print(f"Error while updating page: {e}")
                 continue
@@ -301,16 +382,21 @@ class Crawler:
             print(f'Found {len(links)} links and {len(images)} images.')
             # print(images)
 
+            relevant_links = self.check_relevance(links)
+
             try:
-                requests.post("http://localhost:5000/page/frontierlinks", json={"links": list(links)})
+                response = requests.post("http://localhost:5000/page/frontierlinks", json={
+                    "from_page_id": page_id,
+                    "links": [{"url": url, "relevance": relevance} for url, relevance in relevant_links]
+                })
+                print(response.json)
             except Exception as e:
                 print(f"Error while updating frontier: {e}")
                 continue
 
 
-
     def run(self, num_workers=2):
-        args = (self.frontier, self.last_access_times, self.last_access_ips, self.stop_event)
+        args = (self.stop_event,)
         processes = [multiprocessing.Process(target=self.worker, args=args) for _ in range(num_workers)]
 
         for i, p in enumerate(processes):
@@ -324,4 +410,4 @@ class Crawler:
 # Run the crawler
 if __name__ == '__main__':
     crawler = Crawler()
-    crawler.run(num_workers=3)
+    crawler.run(num_workers=1)
