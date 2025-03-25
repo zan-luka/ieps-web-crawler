@@ -57,39 +57,26 @@ def get_delay():
     try:
         data = request.get_json()
         delay_data = DelayData(**data)
+        print(delay_data)
         result = db.execute(
-            text("""SELECT p.accessed_time FROM crawldb.site s
-                    INNER JOIN crawldb.page p ON p.site_id = s.id
-                    WHERE p.accessed_ip = :ip AND s.domain = :domain
-                    ORDER BY p.accessed_time DESC
-                    LIMIT 1"""),
+            text("""select p.accessed_time from crawldb.site s
+                    inner join crawldb.page p on p.site_id = s.id
+                    where p.accessed_ip = :ip
+                    and s.domain like '%slo-tech.com%'
+                    order by p.accessed_time desc
+                    limit 1;"""),
             {"ip": delay_data.ip, "domain": delay_data.site_url}
         )
-        last_accessed_time = result.scalar()
+        last_accessed_time = result.scalar_one_or_none()
         if last_accessed_time:
-            return jsonify({"delay": (datetime.datetime.utcnow() - last_accessed_time).total_seconds()})
+            time_diff = (datetime.datetime.now() - last_accessed_time).total_seconds()
+            if time_diff < 5:
+                return jsonify({"delay": 5 - time_diff})
+            else:
+                return jsonify({"delay": 0})
         return jsonify({"delay": 0})
     except Exception as e:
         logger.error(f'Error /site/delay: {e}')
-        return jsonify({"error": str(e)}), 500
-    finally:
-        db.close()
-
-@app.route("/frontier", methods=["GET"])
-def get_frontier():
-    db = SessionLocal()
-    try:
-        result = db.execute(
-            text("""select id, url from crawldb.page
-                    where page_type_code = 'FRONTIER';"""),
-        )
-        frontier = result.fetchall()
-        response = []
-        for row in frontier:
-            response.append({"id": row[0], "url": row[1]})
-        return jsonify(response)
-    except Exception as e:
-        logger.error(f'Error /frontier: {e}')
         return jsonify({"error": str(e)}), 500
     finally:
         db.close()
