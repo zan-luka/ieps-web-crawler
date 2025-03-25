@@ -258,8 +258,8 @@ class Crawler:
         while not stop_event.is_set():
             try:
                 frontier_response = requests.get("http://localhost:5000/frontier").json()
-                page_id = frontier_response[0]["id"]
-                url = frontier_response[0]["url"]
+                page_id = frontier_response["id"]
+                url = frontier_response["url"]
             except:
                 print("Frontier is empty.")
                 break
@@ -313,7 +313,8 @@ class Crawler:
         args = (self.frontier, self.last_access_times, self.last_access_ips, self.stop_event)
         processes = [multiprocessing.Process(target=self.worker, args=args) for _ in range(num_workers)]
 
-        for p in processes:
+        for i, p in enumerate(processes):
+            time.sleep(i*5)
             p.start()
         for p in processes:
             p.join()
@@ -323,4 +324,4 @@ class Crawler:
 # Run the crawler
 if __name__ == '__main__':
     crawler = Crawler()
-    crawler.run(num_workers=1)
+    crawler.run(num_workers=3)
