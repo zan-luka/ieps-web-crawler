@@ -6,6 +6,9 @@ class SiteCreate(BaseModel):
     robots_content: str = None
     sitemap_content: str = None
 
+class DelayData(BaseModel):
+    site_url: str
+    ip: str
 
 class PageFrontier(BaseModel):
     site_url: str
@@ -16,6 +19,7 @@ class PageCreate(BaseModel):
     page_type_code: str
     html_content: str = None
     http_status_code: int = None
+    accessed_ip: str  # IPv4 address
 
 
 class PageDataCreate(BaseModel):

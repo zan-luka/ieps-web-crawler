@@ -1,6 +1,6 @@
 import multiprocessing
 import time
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlparse
 from urllib.robotparser import RobotFileParser
 import hashlib
 from bs4 import BeautifulSoup
@@ -18,6 +18,8 @@ options.add_argument("--headless=new")
 class Crawler:
     def __init__(self):
         self.user_agent = "fri-wier-skupina_n"
+        self.hostname = socket.gethostname()
+        self.ip_address = socket.gethostbyname(self.hostname)
         self.frontier = multiprocessing.Queue()
         seed_url = "https://slo-tech.com/"
         self.frontier.put(seed_url)
@@ -31,7 +33,6 @@ class Crawler:
         ## TO DO: read parsed_urls and last access from database?
         self.last_access_times = manager.dict()
         self.last_access_ips = manager.dict()
-        self.parsed_urls = manager.dict()
         self.max_pages = 2
 
     def get_robot_parser(self, domain):
@@ -121,6 +122,18 @@ class Crawler:
             print(f"Error while reading sitemap: {sitemap_url}: {e}")
             return []
 
+    def select_content_type(self, content_type):
+        if "text/html" in content_type:
+            return "HTML"
+        elif "application/pdf" in content_type:
+            return "BINARY"
+        elif "image/" in content_type:
+            return "IMAGE"
+        elif "video/" in content_type:
+            return "VIDEO"
+        else:
+            return "UNKNOWN"
+
     def fetch(self, url):
         driver = webdriver.Firefox(options=options)
         driver.get(url)
@@ -129,9 +142,11 @@ class Crawler:
         cookies = {cookie['name']: cookie['value'] for cookie in driver.get_cookies()}
         response = requests.get(url, cookies=cookies)
         status_code = response.status_code
+        content_type = response.headers.get("Content-Type", "")
+        content_type = self.select_content_type(content_type)
         driver.close()
 
-        return page_source, status_code
+        return page_source, status_code, content_type
 
     def determine_page_type(self, url):
         url = url.lower()
@@ -198,8 +213,8 @@ class Crawler:
             normalized_links.add(link)
         return normalized_links
 
-    def extract_links(self, url, html):
-        soup = BeautifulSoup(html, "html.parser")
+    def extract_links(self, url, soup):
+        #soup = BeautifulSoup(html, "html.parser")
         links = set()
         for a_tag in soup.find_all("a"):
             href = a_tag.get("href")
@@ -215,8 +230,8 @@ class Crawler:
         links = self.normalize_url(url, links)
         return links
 
-    def extract_images(self, url, html):
-        soup = BeautifulSoup(html, "html.parser")
+    def extract_images(self, url, soup):
+        #soup = BeautifulSoup(html, "html.parser")
         images = set()
         for img_tag in soup.find_all("img"):
             src = img_tag.get("src")
@@ -227,57 +242,75 @@ class Crawler:
         images = self.normalize_url(url, images)
         return images
 
+
     def hash_html(self, html_content):
         return hashlib.sha256(html_content.encode("utf-8")).hexdigest()
 
-    def worker(self, frontier, last_access_time, last_access_ips, parsed_urls, stop_event):
+    def get_domain(self, url):
+        parsed_url = urlparse(url)
+        domain = parsed_url.netloc
+        return domain
+
+
+    def worker(self, frontier, last_access_time, last_access_ips, stop_event):
         """Worker function for processes."""
 
         while not stop_event.is_set():
-            if len(parsed_urls) > self.max_pages:
-                print(f"[{multiprocessing.current_process().name}] Enough pages have been retrieved.")
-                print(parsed_urls)
-                stop_event.set()
-                break
-
             try:
-                frontier_response = requests.get("http://localhost:8000/frontier").json()
-                page_id = frontier_response["id"]
-                url = frontier_response["url"]
+                frontier_response = requests.get("http://localhost:5000/frontier").json()
+                page_id = frontier_response[0]["id"]
+                url = frontier_response[0]["url"]
             except:
                 print("Frontier is empty.")
                 break
             
             print(f"Crawling URL: {url}")
-            domain = "{0.scheme}://{0.netloc}".format(urlsplit(url))
-            self.respect_crawl_delay(domain, url, last_access_time, last_access_ips)
+            domain = self.get_domain(url)
 
-            if self.page_type_html(url) == "HTML":
+            delay = requests.post("http://localhost:5000/site/delay", json={"site_url": domain, "ip": self.ip_address}).json()
+            print(f"Delay: {delay['delay']}")
+            time.sleep(delay["delay"])
+            #self.respect_crawl_delay(domain, url, last_access_time, last_access_ips)
 
-                print(f"Fetching: {url}")
-                html, status_code = self.fetch(url)
-                page_hash = self.hash_html(html)
-                try:
-                    requests.put("http://localhost:8000/page/" + str(page_id), json={"page_type_code": "HTML", "html_content": html, "http_status_code": status_code})
-                except Exception as e:
-                    print(f"Error while updating page: {e}")
-                    continue
-                links = self.extract_links(url, html)
-                images = self.extract_images(url, html)
+            print(f"Fetching: {url}")
+            html, status_code, content_type = self.fetch(url)
+            soup = BeautifulSoup(html, "html.parser")
 
-                print(f"{multiprocessing.current_process().name} + {page_hash}")
-                print(links)
-                #print(images)
+            # remove scripts and css
+            for script in soup.find_all("script"):
+                script.decompose()
 
-                parsed_urls[url] = page_hash
+            # Remove all <style> tags
+            for style in soup.find_all("style"):
+                style.decompose()
 
-                for link in links:
-                    if self.determine_page_type(link) in ("HTML", "Unknown") and self.is_allowed(link):
-                        #frontier.put(link)
-                        requests.post("http://localhost:8000/page/frontier", json={"site_url": domain, "url": link})
+            normalized_html = soup.prettify()
+            page_hash = self.hash_html(normalized_html)
+            links = self.extract_links(url, soup)
+            images = self.extract_images(url, soup)
+
+            try:
+                requests.put("http://localhost:5000/page/" + str(page_id),
+                             json={"page_type_code": "HTML", "html_content": html, "http_status_code": status_code,
+                                   "accessed_ip": self.ip_address})
+            except Exception as e:
+                print(f"Error while updating page: {e}")
+                continue
+
+            #print(f"{multiprocessing.current_process().name} + {page_hash}")
+            print(f'Found {len(links)} links and {len(images)} images.')
+            # print(images)
+
+            try:
+                requests.post("http://localhost:5000/page/frontierlinks", json={"links": list(links)})
+            except Exception as e:
+                print(f"Error while updating frontier: {e}")
+                continue
+
+
 
     def run(self, num_workers=2):
-        args = (self.frontier, self.last_access_times, self.last_access_ips, self.parsed_urls, self.stop_event)
+        args = (self.frontier, self.last_access_times, self.last_access_ips, self.stop_event)
         processes = [multiprocessing.Process(target=self.worker, args=args) for _ in range(num_workers)]
 
         for p in processes:
