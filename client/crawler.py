@@ -5,11 +5,14 @@ from urllib.robotparser import RobotFileParser
 import hashlib
 from bs4 import BeautifulSoup
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util import Retry
 from selenium import webdriver
 from selenium.webdriver.firefox.options import Options
 import xml.etree.ElementTree as ET
 import socket
 from urllib.parse import urljoin
+from functools import lru_cache
 
 options = Options()
 options.add_argument("--headless=new")
@@ -20,87 +23,78 @@ class Crawler:
         self.user_agent = "fri-wier-skupina_n"
         self.hostname = socket.gethostname()
         self.ip_address = socket.gethostbyname(self.hostname)
+        self.api_base_url = "http://localhost:5000"
 
-        seed_url = "https://slo-tech.com/"
-        requests.post("http://localhost:5000/page/frontierlinks", json={"from_page_id": None,
-                                                                                   "links": [{"url": seed_url, "relevance": 3}]})
-
+        # Use multiprocessing Manager for process-safe shared objects
         manager = multiprocessing.Manager()
         self.stop_event = manager.Event()
+        # Replace thread-specific locks with manager dictionaries
+        self.site_cache = dict()
+        self.page_hash_cache = dict()
+
+        seed_url = "https://slo-tech.com/"
+
+        # Configure session with better connection pooling
+        self.session = requests.Session()
+
+        # Configure connection pooling with more connections
+        adapter = HTTPAdapter(
+            pool_connections=10,  # Reduced per-process to avoid memory issues
+            pool_maxsize=25,  # More realistic per process
+            max_retries=Retry(
+                total=3,
+                backoff_factor=0.5,
+                status_forcelist=[500, 502, 503, 504],
+                allowed_methods=["HEAD", "GET", "POST", "PUT"]
+            )
+        )
+        self.session.mount("http://", adapter)
+        self.session.mount("https://", adapter)
+        self.session.headers.update({
+            "User-Agent": self.user_agent,
+            "Connection": "keep-alive"
+        })
+
+        # Initial request
+        self._post_api("/page/frontierlinks", json={
+            "from_page_id": None,
+            "links": [{"url": seed_url, "relevance": 3}]
+        })
+
         self.robot_parsers = {}
-        self.max_pages = 1
+        self.max_pages = 5000
+        self.current_iteration = 0
 
-    """
-    def get_robot_parser(self, domain):
 
-        if domain not in self.robot_parsers:
-            rp = RobotFileParser()
-            robots_url = domain + "/robots.txt"
-            try:
-                rp.set_url(robots_url)
-                rp.read()
-                self.robot_parsers[domain] = rp
-            except Exception as e:
-                print(f"Error while reading robots.txt for {domain}: {e}")
-                self.robot_parsers[domain] = None
+    # API helper methods for better caching and connection handling
+    def _get_api(self, endpoint, params=None):
+        """Make a GET request to the API with built-in retry and caching."""
+        url = f"{self.api_base_url}{endpoint}"
+        return self.session.get(url, params=params)
 
-            sitemaps = rp.site_maps()
-            if sitemaps:
-                for sitemap_url in sitemaps:
-                    sitemap_urls = self.parse_sitemap(sitemap_url)
-                    for url in sitemap_urls:
-                        if self.determine_page_type(url) in ("HTML", "Unknown") and self.is_allowed(url):
-                            normalized_urls = self.normalize_url(domain, url)
-                            self.frontier.put(list(normalized_urls)[0])
-        return self.robot_parsers[domain]
+    def _post_api(self, endpoint, json=None):
+        """Make a POST request to the API with built-in retry."""
+        url = f"{self.api_base_url}{endpoint}"
+        return self.session.post(url, json=json)
 
-    def get_ip(self, url):
-        try:
-            domain = urlsplit(url).netloc
-            return socket.gethostbyname(domain)
-        except Exception as e:
-            print(f"Error retrieving IP for {url}: {e}")
-            return None
+    def _put_api(self, endpoint, json=None):
+        """Make a PUT request to the API with built-in retry."""
+        url = f"{self.api_base_url}{endpoint}"
+        return self.session.put(url, json=json)
 
-    def respect_crawl_delay(self, domain, url, last_access_times, last_access_ips):
-        parser = self.get_robot_parser(domain)
-        delay = 5
+    @lru_cache(maxsize=1000)
+    def get_domain(self, url):
+        parsed_url = urlparse(url)
+        domain = parsed_url.netloc
+        return domain
 
-        if parser:
-            crawl_delay = parser.crawl_delay(self.user_agent)
-            if crawl_delay is not None:
-                delay = crawl_delay
-
-        now = time.time()
-
-        # Last access time by domain
-        domain_last = last_access_times.get(domain, 0)
-        domain_wait = delay - (now - domain_last)
-
-        # Last access time by IP
-        ip = self.get_ip(url)
-        ip_last = last_access_ips.get(ip, 0) if ip else 0
-        ip_wait = delay - (now - ip_last) if ip else 0
-
-        # Final wait time is the maximum of both
-        final_wait = max(domain_wait, ip_wait, 0)
-
-        if final_wait > 0:
-            print(f"Waiting {final_wait:.2f}s for {domain} / {ip}")
-            time.sleep(final_wait)
-
-        # Update last access time
-        last_access_times[domain] = time.time()
-        if ip:
-            last_access_ips[ip] = time.time()
-    """
-
+    @lru_cache(maxsize=1000)
     def is_allowed(self, url):
-        parsed = urlsplit(url)
-        domain = f"{parsed.scheme}://{parsed.netloc}"
+        domain = self.get_domain(url)
+        base_url = f"https://{domain}"
 
         if domain not in self.robot_parsers:
-            robots_url = f"{domain}/robots.txt"
+            robots_url = f"{base_url}/robots.txt"
             try:
                 rp = RobotFileParser()
                 rp.set_url(robots_url)
@@ -115,12 +109,11 @@ class Crawler:
             return True
 
         allowed = rp.can_fetch(self.user_agent, url)
-        print(f"[robots.txt] {'Allowed' if allowed else 'Blocked'} → {url}")
         return allowed
 
     def parse_sitemap(self, sitemap_url):
         try:
-            response = requests.get(sitemap_url, timeout=5)
+            response = self.session.get(sitemap_url, timeout=5)
             response.raise_for_status()
             root = ET.fromstring(response.content)
             return [url.text.strip() for url in root.findall(".//{http://www.sitemaps.org/schemas/sitemap/0.9}loc")]
@@ -131,7 +124,7 @@ class Crawler:
     def get_robots_txt(self, domain):
         robots_url = f"https://{domain}/robots.txt"
         try:
-            return requests.get(robots_url, timeout=5).text
+            return self.session.get(robots_url, timeout=5).text
         except Exception as e:
             print(f"[ERROR] Failed to fetch robots.txt for {domain}: {e}")
             return None
@@ -149,7 +142,7 @@ class Crawler:
                 if self.is_allowed(url):
                     normalized_urls = self.normalize_url(domain, url)
                     try:
-                        requests.post("http://localhost:5000/page/frontierlinks", json={
+                        self._post_api("/page/frontierlinks", json={
                             "from_page_id": page_id,
                             "links": [{"url": norm_url, "relevance": 3} for norm_url in normalized_urls]
                         })
@@ -157,14 +150,19 @@ class Crawler:
                         print(f"[ERROR] Failed to enqueue links from sitemap: {e}")
         return sitemap_content
 
-
     def get_or_create_site(self, domain, page_id):
+        # First check shared cache - no lock needed with manager.dict()
+        if domain in self.site_cache:
+            return self.site_cache[domain]
+
         # Check if site already exists
         try:
-            response = requests.get("http://localhost:5000/site/exists", params={"domain": domain})
+            response = self._get_api("/site/exists", params={"domain": domain})
             response.raise_for_status()
             data = response.json()
             if data.get("exists"):
+                # Add to cache - thread-safe with manager.dict()
+                self.site_cache[domain] = data["site_id"]
                 return data["site_id"]
         except Exception as e:
             print(f"[ERROR] Site existence check failed for {domain}: {e}")
@@ -182,21 +180,23 @@ class Crawler:
 
         # Create the site in the DB
         try:
-            response = requests.post("http://localhost:5000/site", json={
+            response = self._post_api("/site", json={
                 "domain": domain,
                 "robots_content": robots_content,
                 "sitemap_content": sitemap_content
             })
             response.raise_for_status()
-            return response.json()["id"]
+            site_id = response.json()["id"]
+
+            # Add to shared cache - thread-safe
+            self.site_cache[domain] = site_id
+
+            return site_id
         except Exception as e:
             print(f"[ERROR] Failed to create site {domain}: {e}")
             return None
 
-        except Exception as e:
-            print(f"Napaka pri get_or_create_site: {e}")
-            return None
-
+    @lru_cache(maxsize=100)
     def select_content_type(self, content_type):
         if "text/html" in content_type:
             return "HTML"
@@ -209,17 +209,29 @@ class Crawler:
         else:
             return "UNKNOWN"
 
-    def fetch(self, url):
-        driver = webdriver.Firefox(options=options)
-        driver.get(url)
-        page_source = driver.page_source
+    def js_required(self, html):
+        if "data-placeholder" in html or "please enable javascript" in html.lower():
+            return True
+        return False
 
-        cookies = {cookie['name']: cookie['value'] for cookie in driver.get_cookies()}
-        response = requests.get(url, cookies=cookies)
+    def fetch(self, url):
+        response = self.session.get(url)
+        page_source = response.text
         status_code = response.status_code
         content_type = response.headers.get("Content-Type", "")
         content_type = self.select_content_type(content_type)
-        driver.close()
+
+        if self.js_required(page_source):
+            driver = webdriver.Firefox(options=options)
+            driver.get(url)
+            page_source = driver.page_source
+
+            cookies = {cookie['name']: cookie['value'] for cookie in driver.get_cookies()}
+            response = self.session.get(url, cookies=cookies)
+            status_code = response.status_code
+            content_type = response.headers.get("Content-Type", "")
+            content_type = self.select_content_type(content_type)
+            driver.close()
 
         return page_source, status_code, content_type
 
@@ -243,36 +255,20 @@ class Crawler:
         else:
             return "Unknown"
 
-    def page_type_html(self, url):
-        url = url.lower()
-
-        if url.endswith(("robots.txt")):
-            return "HTML"
-
-        try:
-            response = requests.head(url, timeout=5, allow_redirects=True)
-            content_type = response.headers.get('Content-Type', '')
-            if "text/html" in content_type:
-                return "HTML"
-            else:
-                return "Unknown"
-        except Exception as e:
-            print(f"[HEAD ERROR] {url}: {e}")
-
     def normalize_url(self, base_url, links):
         if isinstance(links, str):
             links = [links]
 
         normalized_links = set()
         for link in links:
-            # Parse the link
+            if link == "javascript:void(0)":
+                continue
+
             parsed_link = urlsplit(link)
 
-            # If the link is relative, make it absolute
             if not parsed_link.scheme:
                 link = urljoin(base_url, link)
 
-            # Canonicalize the URL
             link = link.strip()
             link = link.lower()
 
@@ -289,34 +285,29 @@ class Crawler:
         return normalized_links
 
     def extract_links(self, url, soup):
-        #soup = BeautifulSoup(html, "html.parser")
         links = set()
         for a_tag in soup.find_all("a"):
             href = a_tag.get("href")
             if href:
                 links.add(href)
 
-        # Include links from onclick attributes
         for tag in soup.find_all():
             if tag.has_attr("onclick"):
                 links.add(tag["onclick"])
 
-        # Correctly extend relative links
         links = self.normalize_url(url, links)
         return links
 
     def extract_images(self, url, soup):
-        #soup = BeautifulSoup(html, "html.parser")
         images = set()
         for img_tag in soup.find_all("img"):
             src = img_tag.get("src")
             if src:
                 images.add(src)
 
-        # Correctly extend relative links
         images = self.normalize_url(url, images)
         return images
-    
+
     def check_relevance(self, links):
         relevant_links = []
         for link in links:
@@ -331,132 +322,140 @@ class Crawler:
                 relevant_links.append((link, relevance))
         return relevant_links
 
-
     def hash_html(self, html_content):
         return hashlib.sha256(html_content.encode("utf-8")).hexdigest()
 
-    def get_domain(self, url):
-        parsed_url = urlparse(url)
-        domain = parsed_url.netloc
-        return domain
-    
     def check_duplicate(self, page_hash):
+        # First check shared cache - no lock needed
+        if page_hash in self.page_hash_cache:
+            return self.page_hash_cache[page_hash]
+
         try:
-            response = requests.get(f"http://localhost:5000/page/exists", params={"content_hash": page_hash})
+            response = self._get_api("/page/exists", params={"content_hash": page_hash})
             response.raise_for_status()
-            return response.json().get("exists", False)
+            result = response.json()
+
+            # Cache the result in shared dictionary
+            self.page_hash_cache[page_hash] = result
+
+            return result
         except Exception as e:
             print(f"Error checking for duplicate: {e}")
             return False
 
-    def worker(self, stop_event):
-        """Worker function for processes."""
-
-        while not stop_event.is_set():
-            html_response = requests.get("http://localhost:5000/page/html-count").json()
-            html_count = html_response["html_page_count"]
-            if html_count > self.max_pages:
-                print(f"[{multiprocessing.current_process().name}] {self.max_pages} pages have been retrieved.")
-                stop_event.set()
-                break
-
-            try:
-                frontier_response = requests.get("http://localhost:5000/frontier").json()
-                page_id = frontier_response["id"]
-                url = frontier_response["url"]
-            except:
-                print("Frontier is empty.")
-                break
-            
-            print(f"Crawling URL: {url}")
-            domain = self.get_domain(url)
-            site_id = self.get_or_create_site(domain, page_id)
-
-            delay = requests.post("http://localhost:5000/site/delay", json={"site_url": domain, "ip": self.ip_address}).json()
-            print(f"Delay: {delay['delay']}")
-            time.sleep(delay["delay"])
-            #self.respect_crawl_delay(domain, url, last_access_time, last_access_ips)
-
-            print(f"Fetching: {url}")
-            html, status_code, content_type = self.fetch(url)
-            soup = BeautifulSoup(html, "html.parser")
-
-            # remove scripts and css
-            for script in soup.find_all("script"):
-                script.decompose()
-
-            # Remove all <style> tags
-            for style in soup.find_all("style"):
-                style.decompose()
-
-            normalized_html = soup.prettify()
-            page_hash = self.hash_html(normalized_html)
-
-            links = self.extract_links(url, soup)
-            images = self.extract_images(url, soup)
-
-            try:
-                requests.put("http://localhost:5000/page/" + str(page_id),
-                            json={
-                                "page_type_code": content_type,
-                                "html_content": html,
-                                "http_status_code": status_code,
-                                "accessed_ip": self.ip_address,
-                                "site_id": site_id,
-                                "content_hash": page_hash 
-                            })
-            except Exception as e:
-                print(f"Error while updating page: {e}")
-                continue
-
-            #print(f"{multiprocessing.current_process().name} + {page_hash}")
-            print(f'Found {len(links)} links and {len(images)} images.')
-            # print(images)
-
-            relevant_links = self.check_relevance(links)
-
-            try:
-                response = requests.post("http://localhost:5000/page/frontierlinks", json={
-                    "from_page_id": page_id,
-                    "links": [{"url": url, "relevance": relevance} for url, relevance in relevant_links]
-                })
-                print(response.json())
-            except Exception as e:
-                print(f"Error while updating frontier: {e}")
-                continue
-
-
-    def handle_duplicate_page(self, original_page_id, duplicate_url):
+    def handle_duplicate_page(self, page_id, original_page_id, duplicate_url, status_code):
         try:
             duplicate_page_data = {
-                "site_id": original_page_id, 
+                "site_id": original_page_id,
                 "page_type_code": "DUPLICATE",
-                "url": duplicate_url,
-                "html_content": None,  
-                "content_hash": None,  
-                "http_status_code": 200,
-                "accessed_time": "2025-03-26T12:00:00Z",  
+                "html_content": None,
+                "content_hash": None,
+                "http_status_code": status_code,
                 "accessed_ip": self.ip_address,
                 "relevance": 0
             }
-            
-            response = requests.post("http://localhost:5000/page", json=duplicate_page_data)
+
+            response = self._put_api("/page/" + str(page_id), json=duplicate_page_data)
             response.raise_for_status()
 
-            duplicate_page_id = response.json().get("id")
-
             link_data = {
-                "from_page": original_page_id,  
-                "to_page": duplicate_page_id  
+                "from_page": original_page_id,
+                "to_page": page_id
             }
 
-            link_response = requests.post("http://localhost:5000/link", json=link_data)
+            link_response = self._post_api("/link", json=link_data)
             link_response.raise_for_status()
 
             print(f"Duplicate page {duplicate_url} linked to original page ID {original_page_id}")
         except Exception as e:
             print(f"Error handling duplicate page {duplicate_url}: {e}")
 
+    def worker(self, stop_event):
+        while not stop_event.is_set():
+            start = time.time()
+
+            if self.current_iteration % 10 == 0:
+                html_response = self._get_api("/page/html-count").json()
+                html_count = html_response["html_page_count"]
+
+                if html_count > self.max_pages:
+                    print(f"[{multiprocessing.current_process().name}] {self.max_pages} pages have been retrieved.")
+                    stop_event.set()
+                    break
+
+            try:
+                frontier_response = self._get_api("/frontier").json()
+                page_id = frontier_response["id"]
+                url = frontier_response["url"]
+            except:
+                print("Frontier is empty.")
+                break
+
+            print(f"Crawling URL: {url}")
+            domain = self.get_domain(url)
+            site_id = self.get_or_create_site(domain, page_id)
+
+            delay = self._post_api("/site/delay", json={"site_url": domain, "ip": self.ip_address}).json()
+            print(f"Delay: {delay['delay']}")
+            time.sleep(delay["delay"])
+
+            print(f"Fetching: {url}")
+            html, status_code, content_type = self.fetch(url)
+            soup = BeautifulSoup(html, "html.parser")
+
+            for script in soup.find_all("script"):
+                script.decompose()
+
+            for style in soup.find_all("style"):
+                style.decompose()
+
+            for meta in soup.find_all("meta"):
+                meta.decompose()
+
+            normalized_html = soup.prettify()
+            page_hash = self.hash_html(normalized_html)
+            duplicate = self.check_duplicate(page_hash)
+
+            print(f'Page duplicate: {duplicate}')
+
+            if duplicate.get("exists", False):
+                self.handle_duplicate_page(page_id, duplicate["page_id"], url, status_code)
+
+            else:
+                links = self.extract_links(url, soup)
+                images = self.extract_images(url, soup)
+
+                try:
+                    self._put_api("/page/" + str(page_id), json={
+                        "page_type_code": content_type,
+                        "html_content": normalized_html,
+                        "http_status_code": status_code,
+                        "accessed_ip": self.ip_address,
+                        "site_id": site_id,
+                        "content_hash": page_hash
+                    })
+                except Exception as e:
+                    print(f"Error while updating page: {e}")
+                    continue
+
+                print(f'Found {len(links)} links and {len(images)} images.')
+
+                relevant_links = self.check_relevance(links)
+
+                try:
+                    response = self._post_api("/page/frontierlinks", json={
+                        "from_page_id": page_id,
+                        "links": [{"url": url, "relevance": relevance} for url, relevance in relevant_links]
+                    })
+                    print(response.json())
+                except Exception as e:
+                    print(f"Error while updating frontier: {e}")
+                    continue
+
+            self.current_iteration += 1
+
+            end = time.time()
+            print(f"Time elapsed: {end - start:.2f}s")
 
     def run(self, num_workers=2):
         args = (self.stop_event,)
@@ -470,7 +469,6 @@ class Crawler:
 
         print("Crawling complete.")
 
-# Run the crawler
 if __name__ == '__main__':
     crawler = Crawler()
-    crawler.run(num_workers=1)
+    crawler.run(num_workers=10)
