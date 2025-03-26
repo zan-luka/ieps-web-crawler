@@ -22,13 +22,13 @@ class Crawler:
         self.ip_address = socket.gethostbyname(self.hostname)
 
         seed_url = "https://slo-tech.com/"
-        response = requests.post("http://localhost:5000/page/frontierlinks", json={"from_page_id": None,
+        requests.post("http://localhost:5000/page/frontierlinks", json={"from_page_id": None,
                                                                                    "links": [{"url": seed_url, "relevance": 3}]})
 
         manager = multiprocessing.Manager()
         self.stop_event = manager.Event()
-
-        self.max_pages = 10
+        self.robot_parsers = {}
+        self.max_pages = 1
 
     """
     def get_robot_parser(self, domain):
@@ -96,13 +96,27 @@ class Crawler:
     """
 
     def is_allowed(self, url):
-        domain = "{0.scheme}://{0.netloc}".format(urlsplit(url))
-        parser = self.get_robot_parser(domain)
-        if parser:
-            if parser.can_fetch(self.user_agent, url) == False:
-                print("false")
-            return parser.can_fetch(self.user_agent, url)
-        return True
+        parsed = urlsplit(url)
+        domain = f"{parsed.scheme}://{parsed.netloc}"
+
+        if domain not in self.robot_parsers:
+            robots_url = f"{domain}/robots.txt"
+            try:
+                rp = RobotFileParser()
+                rp.set_url(robots_url)
+                rp.read()
+                self.robot_parsers[domain] = rp
+            except Exception as e:
+                print(f"[ERROR] Can't fetch robots.txt for {domain}: {e}")
+                self.robot_parsers[domain] = None
+
+        rp = self.robot_parsers[domain]
+        if rp is None:
+            return True
+
+        allowed = rp.can_fetch(self.user_agent, url)
+        print(f"[robots.txt] {'Allowed' if allowed else 'Blocked'} → {url}")
+        return allowed
 
     def parse_sitemap(self, sitemap_url):
         try:
@@ -132,15 +146,16 @@ class Crawler:
             urls = self.parse_sitemap(sitemap_url)
             for url in urls:
                 sitemap_content += url + "\n"
-                #if self.is_allowed(url):
-                normalized_urls = self.normalize_url(domain, url)
-                try:
-                    requests.post("http://localhost:5000/page/frontierlinks", json={
-                        "from_page_id": page_id,
-                        "links": [{"url": norm_url, "relevance": 3} for norm_url in normalized_urls]
-                    })
-                except Exception as e:
-                    print(f"[ERROR] Failed to enqueue links from sitemap: {e}")
+                if self.is_allowed(url):
+                    normalized_urls = self.normalize_url(domain, url)
+                    try:
+                        requests.post("http://localhost:5000/page/frontierlinks", json={
+                            "from_page_id": page_id,
+                            "links": [{"url": norm_url, "relevance": 3} for norm_url in normalized_urls]
+                        })
+                    except Exception as e:
+                        print(f"[ERROR] Failed to enqueue links from sitemap: {e}")
+        return sitemap_content
 
 
     def get_or_create_site(self, domain, page_id):
@@ -304,16 +319,16 @@ class Crawler:
     
     def check_relevance(self, links):
         relevant_links = []
-
         for link in links:
-            relevance = 0
-            link_domain = self.get_domain(link)
-            if link_domain == "slo-tech.com":
-                relevance += 1
-            if any(keyword in link for keyword in ("novice", "forum", "clanki")):
-                relevance += 1
+            if self.is_allowed(link):
+                relevance = 0
+                link_domain = self.get_domain(link)
+                if link_domain == "slo-tech.com":
+                    relevance += 1
+                if any(keyword in link for keyword in ("novice", "forum", "clanki")):
+                    relevance += 1
 
-            relevant_links.append((link, relevance))
+                relevant_links.append((link, relevance))
         return relevant_links
 
 
