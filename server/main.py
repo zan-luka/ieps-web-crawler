@@ -57,23 +57,33 @@ def get_delay():
     try:
         data = request.get_json()
         delay_data = DelayData(**data)
-        print(delay_data)
+
+        default_delay = 5
+        requested_delay = data.get("robots_delay", None)
+        if isinstance(requested_delay, (int, float)) and requested_delay >= 0:
+            delay_to_use = requested_delay
+        else:
+            delay_to_use = default_delay
+        print(delay_to_use)
+
         result = db.execute(
             text("""select p.accessed_time from crawldb.site s
                     inner join crawldb.page p on p.site_id = s.id
                     where p.accessed_ip = :ip
-                    and s.domain like '%slo-tech.com%'
+                    and s.domain = :domain
                     order by p.accessed_time desc
                     limit 1;"""),
             {"ip": delay_data.ip, "domain": delay_data.site_url}
         )
+
         last_accessed_time = result.scalar_one_or_none()
         if last_accessed_time:
             time_diff = (datetime.datetime.now() - last_accessed_time).total_seconds()
-            if time_diff < 5:
-                return jsonify({"delay": 5 - time_diff})
+            if time_diff < delay_to_use:
+                return jsonify({"delay": delay_to_use - time_diff})
             else:
                 return jsonify({"delay": 0})
+        print("No last accessed time")
         return jsonify({"delay": 0})
     except Exception as e:
         logger.error(f'Error /site/delay: {e}')
