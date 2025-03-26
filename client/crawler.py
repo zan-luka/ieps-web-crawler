@@ -28,7 +28,7 @@ class Crawler:
         manager = multiprocessing.Manager()
         self.stop_event = manager.Event()
 
-        self.max_pages = 1
+        self.max_pages = 10
 
     """
     def get_robot_parser(self, domain):
@@ -324,6 +324,15 @@ class Crawler:
         parsed_url = urlparse(url)
         domain = parsed_url.netloc
         return domain
+    
+    def check_duplicate(self, page_hash):
+        try:
+            response = requests.get(f"http://localhost:5000/page/exists", params={"content_hash": page_hash})
+            response.raise_for_status()
+            return response.json().get("exists", False)
+        except Exception as e:
+            print(f"Error checking for duplicate: {e}")
+            return False
 
     def worker(self, stop_event):
         """Worker function for processes."""
@@ -367,13 +376,20 @@ class Crawler:
 
             normalized_html = soup.prettify()
             page_hash = self.hash_html(normalized_html)
+
             links = self.extract_links(url, soup)
             images = self.extract_images(url, soup)
 
             try:
                 requests.put("http://localhost:5000/page/" + str(page_id),
-                             json={"page_type_code": content_type, "html_content": html, "http_status_code": status_code,
-                                   "accessed_ip": self.ip_address, "site_id": site_id})
+                            json={
+                                "page_type_code": content_type,
+                                "html_content": html,
+                                "http_status_code": status_code,
+                                "accessed_ip": self.ip_address,
+                                "site_id": site_id,
+                                "content_hash": page_hash 
+                            })
             except Exception as e:
                 print(f"Error while updating page: {e}")
                 continue
@@ -389,10 +405,42 @@ class Crawler:
                     "from_page_id": page_id,
                     "links": [{"url": url, "relevance": relevance} for url, relevance in relevant_links]
                 })
-                print(response.json)
+                print(response.json())
             except Exception as e:
                 print(f"Error while updating frontier: {e}")
                 continue
+
+
+    def handle_duplicate_page(self, original_page_id, duplicate_url):
+        try:
+            duplicate_page_data = {
+                "site_id": original_page_id, 
+                "page_type_code": "DUPLICATE",
+                "url": duplicate_url,
+                "html_content": None,  
+                "content_hash": None,  
+                "http_status_code": 200,
+                "accessed_time": "2025-03-26T12:00:00Z",  
+                "accessed_ip": self.ip_address,
+                "relevance": 0
+            }
+            
+            response = requests.post("http://localhost:5000/page", json=duplicate_page_data)
+            response.raise_for_status()
+
+            duplicate_page_id = response.json().get("id")
+
+            link_data = {
+                "from_page": original_page_id,  
+                "to_page": duplicate_page_id  
+            }
+
+            link_response = requests.post("http://localhost:5000/link", json=link_data)
+            link_response.raise_for_status()
+
+            print(f"Duplicate page {duplicate_url} linked to original page ID {original_page_id}")
+        except Exception as e:
+            print(f"Error handling duplicate page {duplicate_url}: {e}")
 
 
     def run(self, num_workers=2):
