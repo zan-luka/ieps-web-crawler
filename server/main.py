@@ -121,14 +121,21 @@ def create_pages_frontier():
 
         links = data["links"]
         # Prepare batch insert into Page table
-        stmt = insert(models.Page).values([
-            {"site_id": None, "page_type_code": "FRONTIER", "url": link["url"], "relevance": link["relevance"]}
-            for link in links
-        ]).on_conflict_do_nothing(index_elements=["url"])  # Ignore duplicates
+        chunk_size = 1000
+        for i in range(0, len(links), chunk_size):
+            chunk = links[i: i + chunk_size]
+            stmt = insert(models.Page).values([
+                {
+                    "site_id": None,
+                    "page_type_code": "FRONTIER",
+                    "url": link["url"],
+                    "relevance": link["relevance"],
+                }
+                for link in chunk
+            ]).on_conflict_do_nothing(index_elements=["url"])
+            db.execute(stmt)
 
-        db.execute(stmt)  # Execute batch insert
         db.commit()
-
         # Get ID-s for inserted pages
         from_page_id = data.get("from_page_id")
 
@@ -169,7 +176,7 @@ def update_page(page_id):
 
         existing_page.page_type_code = data["page_type_code"]
         existing_page.http_status_code = data["http_status_code"]
-        existing_page.accessed_time = datetime.datetime.utcnow()
+        existing_page.accessed_time = datetime.datetime.now()
         existing_page.accessed_ip = data["accessed_ip"]
 
         if "site_id" in data:
@@ -257,19 +264,29 @@ def list_frontier_urls():
     db = SessionLocal()
     try:
         results = db.execute(
-            select(models.Page.id, models.Page.url).where(models.Page.page_type_code == "FRONTIER").order_by(models.Page.relevance.desc())
-            .limit(1)
+            text("""
+                        SELECT id, url 
+                        FROM crawldb.page 
+                        WHERE page_type_code = 'FRONTIER' 
+                        ORDER BY relevance DESC 
+                        LIMIT 1 
+                        FOR UPDATE SKIP LOCKED
+                    """)
         ).fetchone()
 
         selected_row_id = results.id
         selected_row_url = results.url
 
-        # update page type to "CRAWLED"
-        db.execute(
-            text("UPDATE crawldb.page SET page_type_code = 'CRAWLING' WHERE id = :id"),
-            {"id": selected_row_id}
-        )
-        db.commit()
+        # update page type to "CRAWLED" and set accessed_time to current time
+        try:
+            db.execute(
+                text("UPDATE crawldb.page SET page_type_code = 'CRAWLING', accessed_time = :accessed_time  WHERE id = :id"),
+                {"id": selected_row_id, "accessed_time": datetime.datetime.now()}
+            )
+            db.commit()
+        except:
+            db.rollback()
+            return jsonify({"error": "Could not update page type"}), 500
 
         return jsonify({"id": selected_row_id, "url": selected_row_url})
     except Exception as e:
@@ -298,7 +315,7 @@ def site_exists():
     db = SessionLocal()
     try:
         domain = request.args.get("domain")
-        site = db.query(models.Site).filter(models.Site.domain == domain).first()
+        site = db.query(models.Site).filter(models.Site.domain.ilike(f"%{domain}%")).first()
         if site:
             return jsonify({"exists": True, "site_id": site.id})
         else:
