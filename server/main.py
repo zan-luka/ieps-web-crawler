@@ -1,3 +1,4 @@
+import base64
 import datetime
 import logging
 import os
@@ -233,12 +234,13 @@ def create_image():
     db = SessionLocal()
     try:
         data = request.get_json()
+        image_data = base64.b64decode(data["data"])
         new_image = models.Image(
             page_id=data["page_id"],
             filename=data["filename"],
             content_type=data["content_type"],
-            data=data["data"],
-            accessed_time=data["accessed_time"],
+            data=image_data,
+            accessed_time=data["accessed_time"]
         )
         db.add(new_image)
         db.commit()
@@ -249,6 +251,7 @@ def create_image():
         return jsonify({"error": str(e)}), 500
     finally:
         db.close()
+
 
 @app.route("/link", methods=["POST"])
 def create_link():

@@ -1,3 +1,5 @@
+import datetime
+import base64
 import multiprocessing
 import time
 from urllib.parse import urlsplit, urlparse
@@ -410,9 +412,15 @@ class Crawler:
             print(f"Fetching: {url}")
             html, status_code, content_type = self.fetch(url)
 
-            if content_type != "HTML":     
-            # TO DO: check if insert works
+            if content_type != "HTML":
                 try:
+                    page_data = {
+                        "page_id": page_id,
+                        "data_type_code": "BINARY", 
+                        "data": html.encode("utf-8")
+                    }
+                    self._post_api("/pagedata", json=page_data)
+
                     self._put_api("/page/" + str(page_id), json={
                         "page_type_code": "BINARY",
                         "html_content": None,
@@ -422,7 +430,7 @@ class Crawler:
                         "content_hash": None
                     })
                 except Exception as e:
-                    print(f"Error while updating page: {e}")
+                    print(f"Error while handling non-HTML content: {e}")
                     continue
                 self.current_iteration += 1
                 continue
@@ -440,18 +448,34 @@ class Crawler:
 
             normalized_html = soup.prettify()
             page_hash = self.hash_html(normalized_html)
+
             duplicate = self.check_duplicate(page_hash)
 
             print(f'Page duplicate: {duplicate}')
 
             if duplicate.get("exists", False):
                 self.handle_duplicate_page(page_id, duplicate["page_id"], url, status_code)
-
             else:
-                # TO DO: check types of links - if not html insert into page_data table for current page url, else continue with insert into frontier
                 links = self.extract_links(url, soup)
-                # TO DO: insert into image table for current page url
                 images = self.extract_images(url, soup)
+
+            for img_url in images:
+                try:
+                    img_content = requests.get(img_url).content
+                    encoded_image_data = base64.b64encode(img_content).decode('utf-8')
+
+                    image_data = {
+                        "page_id": page_id,
+                        "filename": img_url.split("/")[-1],  
+                        "content_type": "image", 
+                        "data": encoded_image_data, 
+                        "accessed_time": datetime.datetime.utcnow().isoformat()
+                    }
+
+                    self._post_api("/image", json=image_data)
+                    print(f"Inserted image: {img_url}")
+                except Exception as e:
+                    print(f"Error inserting image: {img_url} - {e}")
 
                 try:
                     self._put_api("/page/" + str(page_id), json={
@@ -471,17 +495,16 @@ class Crawler:
                 relevant_links = self.check_relevance(links)
 
                 try:
-                    response = self._post_api("/page/frontierlinks", json={
+                    self._post_api("/page/frontierlinks", json={
                         "from_page_id": page_id,
                         "links": [{"url": url, "relevance": relevance} for url, relevance in relevant_links]
                     })
-                    print(response.json())
+                    print(f"Updated frontier links for {url}")
                 except Exception as e:
                     print(f"Error while updating frontier: {e}")
                     continue
 
             self.current_iteration += 1
-
             end = time.time()
             print(f"Time elapsed: {end - start:.2f}s")
 
