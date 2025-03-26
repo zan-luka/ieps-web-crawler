@@ -62,6 +62,7 @@ class Crawler:
         })
 
         self.robot_parsers = {}
+        self.crawl_delays = {}
         self.max_pages = 5000
         self.current_iteration = 0
 
@@ -92,23 +93,29 @@ class Crawler:
     def is_allowed(self, url):
         domain = self.get_domain(url)
         base_url = f"https://{domain}"
+        path = urlsplit(url).path
 
         if domain not in self.robot_parsers:
             robots_url = f"{base_url}/robots.txt"
+            rp = RobotFileParser()
             try:
-                rp = RobotFileParser()
-                rp.set_url(robots_url)
-                rp.read()
+                response = requests.get(robots_url, timeout=5)
+                response.raise_for_status()
+                rp.parse(response.text.splitlines())
                 self.robot_parsers[domain] = rp
+
+                # Save crawl-delay
+                delay = rp.crawl_delay(self.user_agent)
+                self.crawl_delays[domain] = delay if delay is not None else None
             except Exception as e:
                 print(f"[ERROR] Can't fetch robots.txt for {domain}: {e}")
                 self.robot_parsers[domain] = None
 
-        rp = self.robot_parsers[domain]
+        rp = self.robot_parsers.get(domain)
         if rp is None:
             return True
 
-        allowed = rp.can_fetch(self.user_agent, url)
+        allowed = rp.can_fetch(self.user_agent, path)
         return allowed
 
     def parse_sitemap(self, sitemap_url):
@@ -138,13 +145,13 @@ class Crawler:
         for sitemap_url in sitemaps:
             urls = self.parse_sitemap(sitemap_url)
             for url in urls:
-                sitemap_content += url + "\n"
+                sitemap_content += url + " "
                 if self.is_allowed(url):
-                    normalized_urls = self.normalize_url(domain, url)
+                    normalized_url = list(self.normalize_url(domain, url))[0]
                     try:
                         self._post_api("/page/frontierlinks", json={
                             "from_page_id": page_id,
-                            "links": [{"url": norm_url, "relevance": 3} for norm_url in normalized_urls]
+                            "links": [{"url": normalized_url, "relevance": 3}],
                         })
                     except Exception as e:
                         print(f"[ERROR] Failed to enqueue links from sitemap: {e}")
@@ -395,12 +402,31 @@ class Crawler:
             domain = self.get_domain(url)
             site_id = self.get_or_create_site(domain, page_id)
 
-            delay = self._post_api("/site/delay", json={"site_url": domain, "ip": self.ip_address}).json()
+            crawl_delay = self.crawl_delays.get(domain)
+            delay = self._post_api("/site/delay", json={"site_url": domain, "ip": self.ip_address, "robots_delay": crawl_delay}).json()
             print(f"Delay: {delay['delay']}")
             time.sleep(delay["delay"])
 
             print(f"Fetching: {url}")
             html, status_code, content_type = self.fetch(url)
+
+            if content_type != "HTML":     
+            # TO DO: check if insert works
+                try:
+                    self._put_api("/page/" + str(page_id), json={
+                        "page_type_code": "BINARY",
+                        "html_content": None,
+                        "http_status_code": status_code,
+                        "accessed_ip": self.ip_address,
+                        "site_id": site_id,
+                        "content_hash": None
+                    })
+                except Exception as e:
+                    print(f"Error while updating page: {e}")
+                    continue
+                self.current_iteration += 1
+                continue
+
             soup = BeautifulSoup(html, "html.parser")
 
             for script in soup.find_all("script"):
@@ -422,7 +448,9 @@ class Crawler:
                 self.handle_duplicate_page(page_id, duplicate["page_id"], url, status_code)
 
             else:
+                # TO DO: check types of links - if not html insert into page_data table for current page url, else continue with insert into frontier
                 links = self.extract_links(url, soup)
+                # TO DO: insert into image table for current page url
                 images = self.extract_images(url, soup)
 
                 try:

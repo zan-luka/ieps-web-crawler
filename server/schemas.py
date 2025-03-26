@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-
+from typing import Optional
 
 class SiteCreate(BaseModel):
     domain: str
@@ -9,6 +9,7 @@ class SiteCreate(BaseModel):
 class DelayData(BaseModel):
     site_url: str
     ip: str
+    robots_delay: Optional[float] = None
 
 class PageFrontier(BaseModel):
     site_url: str
