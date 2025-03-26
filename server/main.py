@@ -180,6 +180,8 @@ def update_page(page_id):
         else:
             existing_page.html_content = None
 
+        existing_page.content_hash = data["content_hash"]  
+
         db.commit()
         return jsonify({"id": existing_page.id, "url": existing_page.url})
     except Exception as e:
@@ -305,6 +307,24 @@ def site_exists():
         return jsonify({"error": str(e)}), 500
     finally:
         db.close()
+
+@app.route("/page/exists", methods=["GET"])
+def check_page_exists():
+    db = SessionLocal()
+    try:
+        content_hash = request.args.get("content_hash")
+        if not content_hash:
+            return jsonify({"error": "Missing content_hash parameter"}), 400
+
+        existing_page = db.query(models.Page).filter(models.Page.content_hash == content_hash).first()
+
+        if existing_page:
+            return jsonify({"exists": True, "page_id": existing_page.id}), 200
+        else:
+            return jsonify({"exists": False}), 200
+    except Exception as e:
+        logger.error(f"Error in /page/exists: {e}")
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
     app.run(debug=True)

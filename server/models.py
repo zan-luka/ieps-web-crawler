@@ -33,6 +33,7 @@ class Page(Base):
     accessed_time = Column(TIMESTAMP)
     accessed_ip = Column(String(16))
     relevance = Column(Integer)
+    content_hash = Column(String(64), unique=True)
 
 class PageData(Base):
     __tablename__ = "page_data"
