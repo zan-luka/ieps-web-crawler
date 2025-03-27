@@ -412,23 +412,69 @@ class Crawler:
             print(f"Fetching: {url}")
             html, status_code, content_type = self.fetch(url)
 
+            print("TYPE ", content_type)
             if content_type != "HTML":
                 try:
                     page_data = {
                         "page_id": page_id,
                         "data_type_code": "BINARY", 
-                        "data": html.encode("utf-8")
+                        "data": None 
                     }
+                    print(f"Inserting {content_type} metadata into page_data table for {url}")
                     self._post_api("/pagedata", json=page_data)
 
                     self._put_api("/page/" + str(page_id), json={
-                        "page_type_code": "BINARY",
+                        "page_type_code": "BINARY",  
                         "html_content": None,
                         "http_status_code": status_code,
                         "accessed_ip": self.ip_address,
                         "site_id": site_id,
                         "content_hash": None
                     })
+                    print(f"Processed and marked {content_type} as BINARY for {url}")
+
+                    if content_type == "application/pdf":
+                        pdf_response = requests.get(url)
+                        pdf_content = pdf_response.content 
+                        if not pdf_content:
+                            print(f"Warning: No content found for PDF at {url}")
+                            continue  
+
+                        encoded_pdf_data = base64.b64encode(pdf_content).decode('utf-8') 
+
+                        page_data = {
+                            "page_id": page_id,
+                            "data_type_code": "BINARY", 
+                            "data": encoded_pdf_data 
+                        }
+                        self._post_api("/pagedata", json=page_data)
+
+                        self._put_api("/page/" + str(page_id), json={
+                            "page_type_code": "BINARY", 
+                            "html_content": None,
+                            "http_status_code": status_code,
+                            "accessed_ip": self.ip_address,
+                            "site_id": site_id,
+                            "content_hash": None
+                        })
+
+                    else:
+                        page_data = {
+                            "page_id": page_id,
+                            "data_type_code": "BINARY", 
+                            "data": None
+                        }
+                        self._post_api("/pagedata", json=page_data)
+
+                        self._put_api("/page/" + str(page_id), json={
+                            "page_type_code": "BINARY",  
+                            "html_content": None,
+                            "http_status_code": status_code,
+                            "accessed_ip": self.ip_address,
+                            "site_id": site_id,
+                            "content_hash": None
+                        })
+
                 except Exception as e:
                     print(f"Error while handling non-HTML content: {e}")
                     continue
