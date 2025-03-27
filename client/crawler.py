@@ -15,6 +15,7 @@ import xml.etree.ElementTree as ET
 import socket
 from urllib.parse import urljoin
 from functools import lru_cache
+import requests
 
 options = Options()
 options.add_argument("--headless=new")
@@ -224,11 +225,18 @@ class Crawler:
         return False
 
     def fetch(self, url):
-        response = self.session.get(url)
+        response = self.session.get(url, allow_redirects=True) 
         page_source = response.text
         status_code = response.status_code
         content_type = response.headers.get("Content-Type", "")
         content_type = self.select_content_type(content_type)
+
+        if url.endswith(".pdf") or "application/pdf" in content_type:
+            content_type = "BINARY"
+        elif "image/" in content_type:
+            content_type = "BINARY"
+
+        print(url, "Content-Type: ", content_type)
 
         if self.js_required(page_source):
             driver = webdriver.Firefox(options=options)
@@ -250,9 +258,9 @@ class Crawler:
         if url.endswith((".html", ".htm", "robots.txt")):
             return "HTML"
         elif url.endswith(".pdf"):
-            return "PDF"
-        elif url.endswith(".jpg") or url.endswith(".jpeg") or url.endswith(".png"):
             return "BINARY"
+        elif url.endswith(".jpg") or url.endswith(".jpeg") or url.endswith(".png"):
+            return "BINARY" 
         elif url.endswith(".doc"):
             return "DOC"
         elif url.endswith(".docx"):
