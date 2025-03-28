@@ -1,5 +1,4 @@
 import datetime
-import base64
 import multiprocessing
 import time
 from urllib.parse import urlsplit, urlparse
@@ -263,7 +262,7 @@ class Crawler:
         if url.endswith((".html", ".htm", "robots.txt")):
             return "HTML"
         elif url.endswith(".pdf"):
-            return "BINARY"
+            return "PDF"
         elif url.endswith(".jpg") or url.endswith(".jpeg") or url.endswith(".png"):
             return "BINARY" 
         elif url.endswith(".doc"):
@@ -275,7 +274,7 @@ class Crawler:
         elif url.endswith(".pptx"):
             return "PPTX"
         else:
-            return "Unknown"
+            return "HTML"
 
     def normalize_url(self, base_url, links):
         if isinstance(links, str):
@@ -330,18 +329,31 @@ class Crawler:
         images = self.normalize_url(url, images)
         return images
 
-    def check_relevance(self, links):
+    def check_relevance(self, links, page_id):
         relevant_links = []
         for link in links:
             if self.is_allowed(link):
-                relevance = 0
-                link_domain = self.get_domain(link)
-                if link_domain == "slo-tech.com":
-                    relevance += 1
-                if any(keyword in link for keyword in ("novice", "forum", "clanki")):
-                    relevance += 1
+                type = self.determine_page_type(link)
+                if type == "HTML":
+                    relevance = 0
+                    link_domain = self.get_domain(link)
+                    if link_domain == "slo-tech.com":
+                        relevance += 1
+                    if any(keyword in link for keyword in ("novice", "forum", "clanki")):
+                        relevance += 1
 
-                relevant_links.append((link, relevance))
+                    relevant_links.append((link, relevance))
+                else:
+                    try:
+                            page_data = {
+                                "page_id": page_id,
+                                "data_type_code": type, 
+                                "data": None
+                            }
+                            self._post_api("/pagedata", json=page_data)
+                    except Exception as e:
+                        print(f"Error while handling non-HTML content: {e}")
+
         return relevant_links
 
     def hash_html(self, html_content):
@@ -429,14 +441,6 @@ class Crawler:
             print("TYPE ", content_type)
             if content_type != "HTML":
                 try:
-                    page_data = {
-                        "page_id": page_id,
-                        "data_type_code": "BINARY", 
-                        "data": None 
-                    }
-                    print(f"Inserting {content_type} metadata into page_data table for {url}")
-                    self._post_api("/pagedata", json=page_data)
-
                     self._put_api("/page/" + str(page_id), json={
                         "page_type_code": "BINARY",  
                         "html_content": None,
@@ -446,50 +450,6 @@ class Crawler:
                         "content_hash": None
                     })
                     print(f"Processed and marked {content_type} as BINARY for {url}")
-
-                    """
-                    if content_type == "application/pdf":
-                        pdf_response = requests.get(url)
-                        pdf_content = pdf_response.content 
-                        if not pdf_content:
-                            print(f"Warning: No content found for PDF at {url}")
-                            continue  
-
-                        encoded_pdf_data = base64.b64encode(pdf_content).decode('utf-8') 
-
-                        page_data = {
-                            "page_id": page_id,
-                            "data_type_code": "BINARY", 
-                            "data": encoded_pdf_data 
-                        }
-                        self._post_api("/pagedata", json=page_data)
-
-                        self._put_api("/page/" + str(page_id), json={
-                            "page_type_code": "BINARY", 
-                            "html_content": None,
-                            "http_status_code": status_code,
-                            "accessed_ip": self.ip_address,
-                            "site_id": site_id,
-                            "content_hash": None
-                        })
-
-                    else:
-                        page_data = {
-                            "page_id": page_id,
-                            "data_type_code": "BINARY", 
-                            "data": None
-                        }
-                        self._post_api("/pagedata", json=page_data)
-
-                        self._put_api("/page/" + str(page_id), json={
-                            "page_type_code": "BINARY",  
-                            "html_content": None,
-                            "http_status_code": status_code,
-                            "accessed_ip": self.ip_address,
-                            "site_id": site_id,
-                            "content_hash": None
-                        })
-                    """
 
                 except Exception as e:
                     print(f"Error while handling non-HTML content: {e}")
@@ -536,8 +496,7 @@ class Crawler:
 
                 print(f'Found {len(links)} links and {len(images)} images.')
 
-                relevant_links = self.check_relevance(links)
-
+                relevant_links = self.check_relevance(links, page_id)
                 try:
                     self._post_api("/page/frontierlinks", json={
                         "from_page_id": page_id,
@@ -548,17 +507,13 @@ class Crawler:
                     print(f"Error while updating frontier: {e}")
                     continue
 
-            """
             for img_url in images:
                 try:
-                    img_content = requests.get(img_url).content
-                    encoded_image_data = base64.b64encode(img_content).decode('utf-8')
-
                     image_data = {
                         "page_id": page_id,
                         "filename": img_url.split("/")[-1],  
                         "content_type": "image", 
-                        "data": encoded_image_data, 
+                        "data": "", 
                         "accessed_time": datetime.datetime.utcnow().isoformat()
                     }
 
@@ -566,9 +521,6 @@ class Crawler:
                     print(f"Inserted image: {img_url}")
                 except Exception as e:
                     print(f"Error inserting image: {img_url} - {e}")
-
-                
-            """
 
             self.current_iteration += 1
             end = time.time()
