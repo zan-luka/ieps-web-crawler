@@ -345,12 +345,12 @@ class Crawler:
                     relevant_links.append((link, relevance))
                 else:
                     try:
-                            page_data = {
-                                "page_id": page_id,
-                                "data_type_code": type, 
-                                "data": None
-                            }
-                            self._post_api("/pagedata", json=page_data)
+                        page_data = {
+                            "page_id": page_id,
+                            "data_type_code": type, 
+                            "data": None
+                        }
+                        self._post_api("/pagedata", json=page_data)
                     except Exception as e:
                         print(f"Error while handling non-HTML content: {e}")
 
