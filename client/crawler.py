@@ -66,7 +66,7 @@ class Crawler:
 
         self.robot_parsers = {}
         self.crawl_delays = {}
-        self.max_pages = 5000
+        self.max_pages = 25000
         self.current_iteration = 0
 
 
@@ -225,32 +225,37 @@ class Crawler:
         return False
 
     def fetch(self, url):
-        response = self.session.get(url, allow_redirects=True) 
-        page_source = response.text
-        status_code = response.status_code
-        content_type = response.headers.get("Content-Type", "")
-        content_type = self.select_content_type(content_type)
-
-        if url.endswith(".pdf") or "application/pdf" in content_type:
-            content_type = "BINARY"
-        elif "image/" in content_type:
-            content_type = "BINARY"
-
-        print(url, "Content-Type: ", content_type)
-
-        if self.js_required(page_source):
-            driver = webdriver.Firefox(options=options)
-            driver.get(url)
-            page_source = driver.page_source
-
-            cookies = {cookie['name']: cookie['value'] for cookie in driver.get_cookies()}
-            response = self.session.get(url, cookies=cookies)
+        try:
+            response = self.session.get(url, allow_redirects=True)
+            page_source = response.text
             status_code = response.status_code
             content_type = response.headers.get("Content-Type", "")
             content_type = self.select_content_type(content_type)
-            driver.close()
 
-        return page_source, status_code, content_type
+            if url.endswith(".pdf") or "application/pdf" in content_type:
+                content_type = "BINARY"
+            elif "image/" in content_type:
+                content_type = "BINARY"
+
+            print(url, "Content-Type: ", content_type)
+
+            if self.js_required(page_source):
+                driver = webdriver.Firefox(options=options)
+                driver.get(url)
+                page_source = driver.page_source
+
+                cookies = {cookie['name']: cookie['value'] for cookie in driver.get_cookies()}
+                response = self.session.get(url, cookies=cookies)
+                status_code = response.status_code
+                content_type = response.headers.get("Content-Type", "")
+                content_type = self.select_content_type(content_type)
+                driver.close()
+
+            return page_source, status_code, content_type
+
+        except Exception as e:
+            print(f"Request failed: {e}")
+            return None, 500, None
 
     def determine_page_type(self, url):
         url = url.lower()
@@ -358,7 +363,7 @@ class Crawler:
             return result
         except Exception as e:
             print(f"Error checking for duplicate: {e}")
-            return False
+            return {"exists": False}
 
     def handle_duplicate_page(self, page_id, original_page_id, duplicate_url, status_code):
         try:
@@ -411,6 +416,7 @@ class Crawler:
             print(f"Crawling URL: {url}")
             domain = self.get_domain(url)
             site_id = self.get_or_create_site(domain, page_id)
+            print(f'Site ID: {site_id}')
 
             crawl_delay = self.crawl_delays.get(domain)
             delay = self._post_api("/site/delay", json={"site_url": domain, "ip": self.ip_address, "robots_delay": crawl_delay}).json()
@@ -441,6 +447,7 @@ class Crawler:
                     })
                     print(f"Processed and marked {content_type} as BINARY for {url}")
 
+                    """
                     if content_type == "application/pdf":
                         pdf_response = requests.get(url)
                         pdf_content = pdf_response.content 
@@ -482,6 +489,7 @@ class Crawler:
                             "site_id": site_id,
                             "content_hash": None
                         })
+                    """
 
                 except Exception as e:
                     print(f"Error while handling non-HTML content: {e}")
@@ -510,9 +518,37 @@ class Crawler:
             if duplicate.get("exists", False):
                 self.handle_duplicate_page(page_id, duplicate["page_id"], url, status_code)
             else:
+                try:
+                    self._put_api("/page/" + str(page_id), json={
+                        "page_type_code": content_type,
+                        "html_content": normalized_html,
+                        "http_status_code": status_code,
+                        "accessed_ip": self.ip_address,
+                        "site_id": site_id,
+                        "content_hash": page_hash
+                    })
+                except Exception as e:
+                    print(f"Error while updating page: {e}")
+                    continue
+
                 links = self.extract_links(url, soup)
                 images = self.extract_images(url, soup)
 
+                print(f'Found {len(links)} links and {len(images)} images.')
+
+                relevant_links = self.check_relevance(links)
+
+                try:
+                    self._post_api("/page/frontierlinks", json={
+                        "from_page_id": page_id,
+                        "links": [{"url": url, "relevance": relevance} for url, relevance in relevant_links]
+                    })
+                    print(f"Updated frontier links for {url}")
+                except Exception as e:
+                    print(f"Error while updating frontier: {e}")
+                    continue
+
+            """
             for img_url in images:
                 try:
                     img_content = requests.get(img_url).content
@@ -531,32 +567,8 @@ class Crawler:
                 except Exception as e:
                     print(f"Error inserting image: {img_url} - {e}")
 
-                try:
-                    self._put_api("/page/" + str(page_id), json={
-                        "page_type_code": content_type,
-                        "html_content": normalized_html,
-                        "http_status_code": status_code,
-                        "accessed_ip": self.ip_address,
-                        "site_id": site_id,
-                        "content_hash": page_hash
-                    })
-                except Exception as e:
-                    print(f"Error while updating page: {e}")
-                    continue
-
-                print(f'Found {len(links)} links and {len(images)} images.')
-
-                relevant_links = self.check_relevance(links)
-
-                try:
-                    self._post_api("/page/frontierlinks", json={
-                        "from_page_id": page_id,
-                        "links": [{"url": url, "relevance": relevance} for url, relevance in relevant_links]
-                    })
-                    print(f"Updated frontier links for {url}")
-                except Exception as e:
-                    print(f"Error while updating frontier: {e}")
-                    continue
+                
+            """
 
             self.current_iteration += 1
             end = time.time()
@@ -576,4 +588,4 @@ class Crawler:
 
 if __name__ == '__main__':
     crawler = Crawler()
-    crawler.run(num_workers=10)
+    crawler.run(num_workers=3)

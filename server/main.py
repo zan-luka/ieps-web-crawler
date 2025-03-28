@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 # Database Connection
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
-    "postgresql+psycopg2://neondb_owner:npg_CurQ5oWtSTY3@ep-solitary-resonance-a9v88dmb-pooler.gwc.azure.neon.tech/neondb"
+    "postgresql+psycopg2://avnadmin:AVNS_grJJWdHWiDIwlvllK50@pg-381112ff-web-crawler.g.aivencloud.com:15049/defaultdb?sslmode=require"
 )
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
@@ -71,10 +71,10 @@ def get_delay():
             text("""select p.accessed_time from crawldb.site s
                     inner join crawldb.page p on p.site_id = s.id
                     where p.accessed_ip = :ip
-                    and s.domain = :domain
+                    and s.domain like :domain
                     order by p.accessed_time desc
                     limit 1;"""),
-            {"ip": delay_data.ip, "domain": delay_data.site_url}
+            {"ip": delay_data.ip, "domain": "%" + delay_data.site_url + "%"}
         )
 
         last_accessed_time = result.scalar_one_or_none()
