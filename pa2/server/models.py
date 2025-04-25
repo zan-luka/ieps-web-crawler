@@ -1,6 +1,7 @@
 from sqlalchemy import Column, Integer, String, Text, ForeignKey, TIMESTAMP, LargeBinary
 from sqlalchemy.orm import declarative_base
 from pgvector.sqlalchemy import Vector
+from sqlalchemy import TIMESTAMP
 
 Base = declarative_base()
 
@@ -44,6 +45,10 @@ class PageSegment(Base):
     page_id = Column(Integer, ForeignKey("crawldb.page.id"))
     page_segment = Column(Text)
     embedding = Column(Vector(768))
+    title = Column(String(500))
+    time = Column(TIMESTAMP)
+    category = Column(String(255))
+    segment_type = Column(String(50))
 
 class PageData(Base):
     __tablename__ = "page_data"

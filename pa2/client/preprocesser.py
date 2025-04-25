@@ -23,6 +23,12 @@ class PageProcessor:
         url = f"{self.api_base_url}{endpoint}"
         return self.session.get(url, params=params)
     
+    def _put_api(self, endpoint, json=None):
+        """Make a PUT request to the API with built-in retry."""
+        url = f"{self.api_base_url}{endpoint}"
+        return self.session.put(url, json=json)
+    
+    
     def fix_html_structure(self, html_content):
         html_content = html_content.replace('""', '"')
         soup = BeautifulSoup(html_content, 'html.parser')
@@ -44,8 +50,8 @@ class PageProcessor:
         for element in soup.find_all("div", id="menus"):
             element.decompose()
 
-        for br in soup.find_all('br'):
-            br.decompose()
+        #for br in soup.find_all('br'):
+        #    br.decompose()
         return soup
 
     def remove_whitespaces(self, text):
@@ -71,9 +77,11 @@ class PageProcessor:
         if article_div:
             for img_block in article_div.find_all(attrs={"itemprop": "image"}):
                 img_block.decompose()
-            article_text = self.remove_whitespaces(article_div.get_text())
+            for br in article_div.find_all('br'):
+                br.replace_with(' NEWLINE ')
+            raw_text = self.remove_whitespaces(article_div.get_text())
+            article_text = raw_text.replace('NEWLINE', '\n').replace('\n \n', '\n')
 
-        print(article_text, title, category, time)
         return { "title": title, "time": time, "category": category, "article": article_text}
 
     def extract_comments(self, soup):
@@ -93,7 +101,7 @@ class PageProcessor:
                 cleaned_comments.append(text)
 
         return cleaned_comments
-
+    
     def chunk_fixed_length(self, text, chunk_size=50):
         """Fixed length chunking."""
         return [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
@@ -118,16 +126,40 @@ class PageProcessor:
 
         return chunks
 
+    def chunk_by_paragraphs(self, text, max_words=256):
+        paragraphs = [paragraph.strip() for paragraph in text.split('\n') if paragraph.strip()]
+        chunks = []
+
+        for paragraph in paragraphs:
+            words = paragraph.split()
+            if len(words) <= max_words:
+                chunks.append(paragraph)
+            else:
+                smaller_chunks = self.chunk_segments(paragraph, max_words=max_words)
+                chunks.extend(smaller_chunks)
+        return chunks
+
+    def get_chunks(self, news_data, comments_data):
+        chunks = []   
+        if news_data["article"] and news_data["article"].strip() != "":
+            article_chunks = self.chunk_by_paragraphs(news_data['article'])
+            for chunk in article_chunks:
+                chunks.append({"text": chunk, "segment_type": "article"})
+
+        if comments_data:
+            for comment in comments_data:
+                if comment.strip() != "":
+                    comment_chunks = self.chunk_segments(comment)
+                    for chunk in comment_chunks:
+                        chunks.append({"text": chunk, "segment_type": "comment"})
+        return chunks
 
     def calculate_embeddings(self, chunks):
-        global model
-        embeddings = []
         for chunk in chunks:
-            embedding = model.encode(chunk).tolist()
-            embeddings.append(embedding)
+            embedding = self.model.encode(chunk["text"]).tolist()
+            chunk["embedding"] = embedding
         
-        return embeddings
-
+        return chunks
 
     def query_db_cosine(self, query, table_name):
         """
@@ -159,29 +191,33 @@ class PageProcessor:
         response = self._get_api("/pages/html")
         if response.status_code == 200:
             html_pages = response.json()
-            page_data = []
             for page in html_pages:
                 page_id = page['id']
-                html_content = page['html_content']
+                html_content = page['html_content']               
                 fixed_html = self.fix_html_structure(html_content)
+                # Not sure if cleaned_html is ok
+                cleaned_html = self.remove_whitespaces(fixed_html.get_text())
+
                 news_data = self.extract_news_data(fixed_html)
-                #comments_data = self.extract_comments(fixed_html)
-                if (news_data is None):
-                    print("none")
-                page_data.append(news_data)
-            print(page_data)
+                comments_data = self.extract_comments(fixed_html)
+                # Maybe also extract data from članki pages?
+
+                chunks = self.get_chunks(news_data, comments_data)
+                chunks_with_embeddings = self.calculate_embeddings(chunks)
+
+                if chunks_with_embeddings:
+                    try:
+                        self._put_api("/page/update", json={
+                            "page_id": page_id,
+                            "cleaned_html": cleaned_html,
+                            "news_data": news_data,
+                            "chunks": chunks_with_embeddings
+                        })
+                    except Exception as e:
+                        print(f"[ERROR] Failed to update tables: {e}")
         else:
-            print("Failed to fetch pages:", response.status_code, response.text)
+            print("Failed to fetch pages:", response.status_code, response.text)        
     
 if __name__ == "__main__":
     processor = PageProcessor()
     processor.get_htmls()
-
-#if __name__ == "__main__":
-    #with open("../test.html", "r", encoding="utf-8") as file:
-        #html_content = file.read()
-
-    #soup = fix_html_structure(html_content)
-    #extract_news_data(soup)
-    #extract_comments(soup)
-
