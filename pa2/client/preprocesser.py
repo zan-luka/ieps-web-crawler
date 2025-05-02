@@ -60,33 +60,47 @@ class PageProcessor:
 
 
     def extract_article_data_from_clean_html(self, clean_html):
-        html_str = str(clean_html)
-        tree = html.fromstring(html_str)
-
-        title = tree.xpath('//h1[@class="current"]/text()')
-        title = title[0].strip() if title else None
-
-        author_match = re.search(r'<span itemprop="name">\s*(.*?)\s*</span>', html_str)
-        author = author_match.group(1).strip() if author_match else None
-
-        date_match = re.search(r'<time datetime="([^"]+)"', html_str)
-        date = date_match.group(1) if date_match else None
-
-        category = tree.xpath('//li[contains(@class, "categories")]/a/text()')
-        category = category[0].strip() if category else None
-
-        body_parts = tree.xpath('//div[@class="besediloNovice"]//text()')
-        body = ' '.join(p.strip() for p in body_parts if p.strip())
-
-        return {
-            'type': 'article',
-            'title': title,
-            'author': author,
-            'date': date,
-            'category': category,
-            'content': body
-        }
+        """Extract article data from cleaned HTML with improved error handling"""
+        if not clean_html:
+            print("[WARNING] Received empty HTML content to extract")
+            return {"title": None, "content": "", "author": None, "date": None, "category": None}
         
+        html_str = str(clean_html)
+        if not html_str.strip():
+            print("[WARNING] Empty HTML string after conversion")
+            return {"title": None, "content": "", "author": None, "date": None, "category": None}
+            
+        try:
+            tree = html.fromstring(html_str)
+            
+            title = tree.xpath('//h1[@class="current"]/text()')
+            title = title[0].strip() if title else None
+            
+            author_match = re.search(r'<span itemprop="name">\s*(.*?)\s*</span>', html_str)
+            author = author_match.group(1).strip() if author_match else None
+            
+            date_match = re.search(r'<time datetime="([^"]+)"', html_str)
+            date = date_match.group(1) if date_match else None
+            
+            category = tree.xpath('//li[contains(@class, "categories")]/a/text()')
+            category = category[0].strip() if category else None
+            
+            body_parts = tree.xpath('//div[@class="besediloNovice"]//text()')
+            body = ' '.join(p.strip() for p in body_parts if p.strip())
+            
+            return {
+                'type': 'article',
+                'title': title,
+                'author': author,
+                'date': date,
+                'category': category,
+                'content': body
+            }
+        except Exception as e:
+            print(f"[ERROR] Failed to parse HTML: {e}")
+            print(f"HTML content preview: {html_str[:100]}...")
+            return {"title": None, "content": "", "author": None, "date": None, "category": None}
+            
     def extract_comments(self, clean_html):
         """Extracts user comments from Slo-Tech cleaned HTML"""
         tree = html.fromstring(str(clean_html))
@@ -206,13 +220,8 @@ class PageProcessor:
                     
                 # If adding this paragraph would make the chunk too large, store current chunk and start new one
                 if current_chunk_length + len(para) > max_chunk_length and current_chunk_length >= min_chunk_length:
-                    # Add title context to the chunk to improve embedding context
-                    chunk_text = current_chunk
-                    if title:
-                        chunk_text = f"From article: {title}. {chunk_text}"
-                        
                     chunks.append({
-                        "text": chunk_text,
+                        "text": current_chunk,
                         "segment_type": "paragraph",
                         "section": f"content_{len(chunks)}",
                         "title": title
@@ -228,8 +237,6 @@ class PageProcessor:
             
             if current_chunk and current_chunk_length >= min_chunk_length:
                 chunk_text = current_chunk
-                if title:
-                    chunk_text = f"From article: {title}. {chunk_text}"
                     
                 chunks.append({
                     "text": chunk_text,
@@ -242,9 +249,9 @@ class PageProcessor:
             if isinstance(comments_data, list):
                 for i, comment in enumerate(comments_data):
                     if isinstance(comment, dict):
-                        comment_text = comment.get("text", "")
+                        comment_text = comment.get("text", "") or comment.get("content", "")
                         author = comment.get("author", "")
-                        date = comment.get("date", "")
+                        date = comment.get("date", "") or comment.get("datetime", "")
                     else:
                         comment_text = str(comment)
                         author = ""
@@ -259,14 +266,14 @@ class PageProcessor:
                             "text": enhanced_text,
                             "segment_type": "comment",
                             "section": f"comment_{i}",
-                            "title": title
+                            "title": title,
                         })
             elif isinstance(comments_data, str) and comments_data.strip():
                 chunks.append({
                     "text": f"Comment on: {title}. {comments_data}",
                     "segment_type": "comment",
                     "section": "comment_single",
-                    "title": title
+                    "title": title,
                 })
         
         return chunks
@@ -274,7 +281,7 @@ class PageProcessor:
     def get_embedding(self, text, model_name="LaBSE"):
         """Get embedding using LaBSE (or fallback to SloBERTa if needed)"""
         if not text or text.strip() == "":
-            return [0.0] * 768 
+            return [0.0] * 768
 
         try:
             if model_name == "LaBSE":
@@ -297,17 +304,14 @@ class PageProcessor:
     def calculate_embeddings_batch(self, chunks, batch_size=20, model_name="LaBSE"):
         """Calculate embeddings for chunks in batches using LaBSE"""
         processed_chunks = []
-
         for i in range(0, len(chunks), batch_size):
             batch = chunks[i:i + batch_size]
             texts = [chunk["text"] for chunk in batch]
-
             try:
                 if model_name == "LaBSE":
                     embeddings = self.local_model.encode(texts, convert_to_numpy=True)
                 else:
                     embeddings = [self.get_embedding(text, model_name="sloberta") for text in texts]
-
                 for chunk, emb in zip(batch, embeddings):
                     chunk["embedding"] = emb.tolist() if hasattr(emb, "tolist") else emb
 
@@ -326,7 +330,6 @@ class PageProcessor:
         """
         The query_db_cosine function retrieves the top 5 most similar sentences from a pgvector database based on cosine distance. 
         It uses a pre-trained SentenceTransformer model to encode the input query and then searches for the closest embeddings stored in the database.
-
         Parameters
         - query (str): The input text query to be searched.
         - table_name (str): The name of the table containing the stored sentence embeddings. Possible options are showcase.vector_demo and showcase.vector_demo2
@@ -334,10 +337,8 @@ class PageProcessor:
         
         #download the model
         global model, conn, cur
-
         #calculate embedding for the query
         query_embedding = model.encode(query).tolist()  
-
         # execute the query to fetch the top 5 most similar sentences based on cosine distance
         result = cur.execute(
             'SELECT chunk, 1 - (embedding <=> %s::vector) AS similarity '
@@ -349,35 +350,114 @@ class PageProcessor:
         return result
 
     def get_htmls(self):
-        response = self._get_api("/pages/html")
-        if response.status_code == 200:
-            html_pages = response.json()
-            for page in html_pages:
-                page_id = page['id']
-                html_content = page['html_content']
-
-                # Clean and extract structured content
-                fixed_html = self.fix_html_structure(html_content)
-                news_data = self.extract_article_data_from_clean_html(fixed_html)
-                comments = self.extract_comments(fixed_html)
-
-                chunks = self.get_chunks(news_data, comments)
-
-                # Compute embeddings using LaBSE (or sloberta optionally)
-                chunks_with_embeddings = self.calculate_embeddings_batch(chunks, model_name="LaBSE")
-
-                if chunks_with_embeddings:
+        print("Starting HTML page processing...")
+        start_time = time.time()
+        try:
+            response = self._get_api("/pages/html")
+            print(f"API response status: {response.status_code}")
+            if response.status_code == 200:
+                html_pages = response.json()
+                total_pages = len(html_pages)
+                print(f"Found {total_pages} pages to process")
+                if total_pages == 0:
+                    print("No pages to process. Check if database has HTML pages.")
+                    return
+                processed_count = 0
+                success_count = 0
+                error_count = 0
+                for page in html_pages:
+                    page_id = page.get('id')
+                    html_content = page.get('html_content', '')
+                    
+                    if processed_count % 10 == 0 or processed_count == total_pages - 1:
+                        elapsed_time = time.time() - start_time
+                        print(f"Progress: {processed_count}/{total_pages} pages ({(processed_count/total_pages)*100:.1f}%) in {elapsed_time:.2f}s")
+                    
+                    if not page_id:
+                        print("[ERROR] Page missing ID, skipping")
+                        error_count += 1
+                        continue
+                    
+                    if not html_content or not html_content.strip():
+                        print(f"[WARNING] Page {page_id} has empty HTML content, skipping")
+                        error_count += 1
+                        continue
+                        
+                    if processed_count == 0:
+                        print(f"First page ID: {page_id}")
+                        print(f"HTML content size: {len(html_content)} bytes")
+                        print(f"HTML content preview: {html_content[:100]}...")
                     try:
-                        self._put_api("/page/update", json={
-                            "page_id": page_id,
-                            "cleaned_html": self.remove_whitespaces(fixed_html.get_text()),
-                            "news_data": news_data,
-                            "chunks": chunks_with_embeddings
-                        })
+                        fixed_html = self.fix_html_structure(html_content)
+                        if not fixed_html:
+                            print(f"[WARNING] Page {page_id} returned empty fixed HTML")
+                            error_count += 1
+                            continue
+                            
+                        news_data = self.extract_article_data_from_clean_html(fixed_html)
+                        comments = self.extract_comments(fixed_html)
+                        if not news_data.get('content') and comments and isinstance(comments, list) and len(comments) > 0:
+                            print(f"[INFO] Page {page_id}: No article content but {len(comments)} comments found. Using comments as content.")
+                            comment_content = []
+                            for comment in comments[:10]:
+                                if isinstance(comment, dict) and comment.get('content'):
+                                    comment_content.append(comment.get('content'))
+                            if comment_content:
+                                news_data['content'] = " \n\n ".join(comment_content)
+                                print(f"[INFO] Page {page_id}: Created content from comments ({len(news_data['content'])} chars)")
+                        
+                        chunks = self.get_chunks(news_data, comments)
+                        
+                        if not chunks:
+                            print(f"[WARNING] Page {page_id}: No chunks generated from content")
+
+                        title = news_data.get('title', '')
+                        for chunk in chunks:
+                            if chunk["segment_type"] == "comment" and chunk["text"].startswith(f"Comment on: {title}."):
+                                chunk["text"] = chunk["text"].replace(f"Comment on: {title}. ", "")
+
+                        chunks_with_embeddings = self.calculate_embeddings_batch(chunks, model_name="LaBSE")
+                        
+                        if chunks_with_embeddings:
+                            try:
+                                update_response = self._put_api("/page/update", json={
+                                    "page_id": page_id,
+                                    "cleaned_html": self.remove_whitespaces(str(fixed_html)),
+                                    "news_data": news_data,
+                                    "chunks": chunks_with_embeddings
+                                })
+                                
+                                if update_response.status_code == 200:
+                                    success_count += 1
+                                    processed_count += 1
+                                    if processed_count % 5 == 0:
+                                        print(f"[INFO] Successfully processed {processed_count}/{total_pages} pages")
+                                else:
+                                    print(f"[ERROR] Failed to update page {page_id}: {update_response.status_code} - {update_response.text}")
+                                    error_count += 1
+                            except Exception as e:
+                                print(f"[ERROR] Failed to update DB for page {page_id}: {str(e)}")
+                                error_count += 1
+                        else:
+                            print(f"[WARNING] No chunks with embeddings generated for page {page_id}")
+                            error_count += 1
                     except Exception as e:
-                        print(f"[ERROR] Failed to update DB for page {page_id}: {e}")
-        else:
-            print("Failed to fetch pages:", response.status_code, response.text)
+                        print(f"[ERROR] Failed to process page {page_id}: {str(e)}")
+                        error_count += 1
+                
+                total_time = time.time() - start_time
+                print(f"Processing complete. Processed {processed_count}/{total_pages} pages in {total_time:.2f} seconds")
+                print(f"Success: {success_count}, Errors: {error_count}")
+                if processed_count > 0:
+                    print(f"Average processing time per page: {total_time/processed_count:.2f} seconds")
+            else:
+                print(f"Failed to fetch pages: {response.status_code}")
+                try:
+                    print(f"Response content: {response.text}")
+                except:
+                    print("Could not display response content")
+        except Exception as e:
+            print(f"[ERROR] Exception in get_htmls: {str(e)}")
 
 
 if __name__ == "__main__":

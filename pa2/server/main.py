@@ -116,8 +116,9 @@ def query():
             sql = text("""
                 WITH similarities AS (
                     SELECT ps.page_id, ps.page_segment, ps.segment_type, ps.title, 
-                           1 - (embedding <=> :vector) AS similarity
+                           p.url, 1 - (embedding <=> :vector) AS similarity
                     FROM crawldb.page_segment ps
+                    JOIN crawldb.page p ON ps.page_id = p.id
                 )
                 SELECT * FROM similarities
                 ORDER BY similarity DESC
@@ -127,8 +128,9 @@ def query():
             sql = text("""
                 WITH distances AS (
                     SELECT ps.page_id, ps.page_segment, ps.segment_type, ps.title, 
-                           (embedding <+> :vector) AS distance
+                           p.url, (embedding <+> :vector) AS distance
                     FROM crawldb.page_segment ps
+                    JOIN crawldb.page p ON ps.page_id = p.id
                 )
                 SELECT * FROM distances
                 ORDER BY distance ASC
@@ -138,8 +140,9 @@ def query():
             sql = text("""
                 WITH distances AS (
                     SELECT ps.page_id, ps.page_segment, ps.segment_type, ps.title, 
-                           -(embedding <#> :vector) AS distance
+                           p.url, -(embedding <#> :vector) AS distance
                     FROM crawldb.page_segment ps
+                    JOIN crawldb.page p ON ps.page_id = p.id
                 )
                 SELECT * FROM distances
                 ORDER BY distance DESC
@@ -158,12 +161,13 @@ def query():
                 "page_id": row[0],
                 "segment": row[1],
                 "segment_type": row[2],
-                "title": row[3]
+                "title": row[3],
+                "url": row[4]
             }
             if metric == "cosine":
-                result_entry["similarity"] = float(row[4])
+                result_entry["similarity"] = float(row[5])
             else:
-                result_entry["distance"] = float(row[4])
+                result_entry["distance"] = float(row[5])
             formatted_results.append(result_entry)
 
         logger.info(f"Query returned {len(formatted_results)} results using model '{model_choice}' and metric '{metric}'")
@@ -176,8 +180,6 @@ def query():
     finally:
         db.close()
 
-
-
 @app.route("/pages/html", methods=["GET"])
 def get_all_html_pages():
     db = SessionLocal()
@@ -186,7 +188,7 @@ def get_all_html_pages():
             models.Page.page_type_code == 'HTML',
             models.Page.html_content.isnot(None),
             models.Page.http_status_code == 200
-        ).limit(3).all()      # Limit set for testing
+        )   # Limit set for testing
 
         pages = [
             {

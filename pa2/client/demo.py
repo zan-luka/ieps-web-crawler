@@ -31,7 +31,7 @@ html_template = """
                 <input type="text" name="query" placeholder="Enter your search query" value="{{ query }}" required>
                 <select name="preset_query">
                     <option value="">-- Choose a predefined query --</option>
-                    <option value="Google">Google</option>
+                    <option value="Boeing">Boeing</option>
                     <option value="starlink">starlink</option>
                     <option value="Apple">Apple</option>
                     <option value="Mozilla">Mozilla</option>
@@ -65,6 +65,9 @@ html_template = """
                     <p class="score">{{ score_label }}: {{ result.score }}</p>
                     <p><strong>Segment Type:</strong> {{ result.segment_type }}</p>
                     <p><strong>Title:</strong> {{ result.title }}</p>
+                    {% if result.url %}
+                    <p><strong>URL:</strong> <a href="{{ result.url }}" target="_blank">{{ result.url }}</a></p>
+                    {% endif %}
                     <p>{{ result.text | safe }}</p>
                 </div>
             {% endfor %}
@@ -104,11 +107,12 @@ def search():
         if query:
             try:
                 api_url = "http://localhost:5000/query"
+                adjusted_limit = limit * 2
                 payload = {
                     "query": query,
                     "metric": metric,
                     "model": model,
-                    "limit": limit
+                    "limit": adjusted_limit 
                 }
 
                 response = requests.post(api_url, json=payload)
@@ -116,15 +120,27 @@ def search():
                 if response.status_code == 200:
                     data = response.json()
                     formatted_results = []
+                    seen_texts = set()  
+                    
                     for item in data.get('results', []):
+                        if len(formatted_results) >= limit:
+                            break 
+                            
                         score_key = "similarity" if metric == "cosine" else "distance"
                         score = round(item.get(score_key, 0.0), 4)
+                        text = item.get("segment", "")
+                        
+                        if text in seen_texts:
+                            continue
+                            
+                        seen_texts.add(text)
                         formatted_results.append({
-                            "text": item.get("segment", ""),
+                            "text": text,
                             "score": score,
                             "title": item.get("title", ""),
                             "segment_type": item.get("segment_type", ""),
-                            "page_id": item.get("page_id", "")
+                            "page_id": item.get("page_id", ""),
+                            "url": item.get("url", "")
                         })
 
                     results = formatted_results
