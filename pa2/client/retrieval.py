@@ -5,85 +5,45 @@ import requests
 class InformationRetrieval:
     def __init__(self):
         self.session = requests.Session()
-        self.api_base_url = "http://localhost:5000"
-
-        # try different models
+        self.api_base_url = "http://localhost:5000"  # Adjust this URL if necessary
         self.model = SentenceTransformer('sentence-transformers/LaBSE')
 
-    # API helper methods for better caching and connection handling
-    def _get_api(self, endpoint, params=None):
-        """Make a GET request to the API with built-in retry and caching."""
-        url = f"{self.api_base_url}{endpoint}"
-        return self.session.get(url, params=params)
-    
-    #query using L1 distance
+    def query_db(self, query, metric="cosine"):
+        """
+        Sends a request to the server's /query endpoint to retrieve the top 5 most similar sentences
+        using the specified distance metric (cosine, L1, or inner).
+        """
+        data = {
+            "query": query,
+            "metric": metric
+        }
+
+        # Send POST request to /query endpoint
+        response = self.session.post(f"{self.api_base_url}/query", json=data)
+
+        if response.status_code == 200:
+            return response.json()  # Returns the JSON response with the query results
+        else:
+            print(f"Error querying the database: {response.text}")
+            return None
+
     def query_db_L1(self, query):
         """
-        The query_db_L1 function retrieves the top 5 most similar sentences from a pgvector database based on L1 (Manhattan) distance. 
-        It uses a pre-trained SentenceTransformer model to encode the input query and then searches for the closest embeddings stored in the database.
-        """       
+        Retrieves the top 5 most similar sentences based on L1 (Manhattan) distance using the server's /query endpoint.
+        """
+        return self.query_db(query, metric="L1")
 
-        #calculate embedding for the query
-        query_embedding = self.model.encode(query).tolist()  
-
-        # TODO: Following the logic below add an API call in main.py
-        # execute the query to fetch the top 5 most similar sentences based on L1 distance
-        result = cur.execute(
-            'SELECT sentence, (embedding <+> %s::vector) AS distance '
-            'FROM ' + PageSegment + ' '
-            'ORDER BY embedding <+> %s::vector '
-            'LIMIT 5',
-            (query_embedding, query_embedding)  # pass the embedding twice, once for ordering and once for calculation
-        ).fetchall()
-        cur.close()
-        conn.close()
-        return result
-
-    #query using cosine distance
     def query_db_cosine(self, query):
         """
-        The query_db_cosine function retrieves the top 5 most similar sentences from a pgvector database based on cosine distance. 
-        It uses a pre-trained SentenceTransformer model to encode the input query and then searches for the closest embeddings stored in the database.
-        """  
+        Retrieves the top 5 most similar sentences based on cosine distance using the server's /query endpoint.
+        """
+        return self.query_db(query, metric="cosine")
 
-        #calculate embedding for the query
-        query_embedding = self.model.encode(query).tolist()  
-
-        # TODO: Following the logic below add an API call in main.py
-        # execute the query to fetch the top 5 most similar sentences based on cosine distance
-        result = cur.execute(
-            'SELECT sentence, 1 - (embedding <=> %s::vector) AS distance '
-            'FROM ' + PageSegment + ' '
-            'ORDER BY embedding <=> %s::vector '
-            'LIMIT 5',
-            (query_embedding, query_embedding)  # pass the embedding twice, once for ordering and once for calculation
-        ).fetchall()
-        cur.close()
-        conn.close()
-        return result
-
-    #query using negative inner product
     def query_db_inner(self, query):
         """
-        The query_db_inner function retrieves the top 5 most similar sentences from a pgvector database based on (negative) inner product. 
-        It uses a pre-trained SentenceTransformer model to encode the input query and then searches for the closest embeddings stored in the database.
+        Retrieves the top 5 most similar sentences based on negative inner product using the server's /query endpoint.
         """
-
-        #calculate embedding for the query
-        query_embedding = self.model.encode(query).tolist()  
-
-        # TODO: Following the logic below add an API call in main.py
-        # execute the query to fetch the top 5 most similar sentences based negative inner product
-        result = cur.execute(
-            'SELECT sentence, -(embedding <#> %s::vector) AS distance '
-            'FROM ' + PageSegment + ' '
-            'ORDER BY embedding <#> %s::vector '
-            'LIMIT 5',
-            (query_embedding, query_embedding)  # pass the embedding twice, once for ordering and once for calculation
-        ).fetchall()
-        cur.close()
-        conn.close()
-        return result
+        return self.query_db(query, metric="inner")
 
 if __name__ == "__main__":
     retrieval = InformationRetrieval()

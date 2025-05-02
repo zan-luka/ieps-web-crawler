@@ -8,6 +8,8 @@ from datetime import datetime
 import locale
 from datetime import datetime, timedelta
 import re
+from sentence_transformers import SentenceTransformer
+from sqlalchemy import text
 
 # Logging
 logging.basicConfig(level=logging.INFO)
@@ -69,7 +71,113 @@ def convert_time_to_timestamp(time_str):
 @app.route("/test", methods=["GET"])
 def test():
     return jsonify({"message": "Flask is working"})
-    
+
+@app.route("/query", methods=["POST"])
+def query():
+    """Handles a query, retrieves relevant results based on embedding similarity."""
+    db = SessionLocal()
+    try:
+        data = request.get_json()
+        query_text = data.get("query")
+        metric = data.get("metric", "cosine").lower()
+        model_choice = data.get("model", "sloberta").lower()
+        limit = int(data.get("limit", 5))  # Default to 5 results
+
+        if not query_text:
+            return jsonify({"error": "Query text is required."}), 400
+
+        # === Generate Embedding ===
+        if model_choice == "labse":
+            from sentence_transformers import SentenceTransformer
+            labse_model = SentenceTransformer("sentence-transformers/LaBSE")
+            query_embedding = labse_model.encode(query_text, convert_to_numpy=True)
+            logger.info("Using LaBSE model for embedding.")
+        else:
+            from transformers import AutoTokenizer, AutoModel
+            import torch
+            tokenizer = AutoTokenizer.from_pretrained("EMBEDDIA/sloberta")
+            model = AutoModel.from_pretrained("EMBEDDIA/sloberta")
+            inputs = tokenizer(query_text, return_tensors="pt", padding=True, truncation=True, max_length=512)
+            with torch.no_grad():
+                outputs = model(**inputs)
+            attention_mask = inputs['attention_mask']
+            token_embeddings = outputs.last_hidden_state
+            input_mask_expanded = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
+            sum_embeddings = torch.sum(token_embeddings * input_mask_expanded, 1)
+            sum_mask = torch.clamp(input_mask_expanded.sum(1), min=1e-9)
+            query_embedding = (sum_embeddings / sum_mask).squeeze().numpy()
+            logger.info("Using SloBERTa model for embedding.")
+
+        # Format the vector for pgvector
+        vector_string = f"[{', '.join(str(float(val)) for val in query_embedding)}]"
+
+        # === SQL Query Based on Metric ===
+        if metric == "cosine":
+            sql = text("""
+                WITH similarities AS (
+                    SELECT ps.page_id, ps.page_segment, ps.segment_type, ps.title, 
+                           1 - (embedding <=> :vector) AS similarity
+                    FROM crawldb.page_segment ps
+                )
+                SELECT * FROM similarities
+                ORDER BY similarity DESC
+                LIMIT :limit
+            """)
+        elif metric == "l1":
+            sql = text("""
+                WITH distances AS (
+                    SELECT ps.page_id, ps.page_segment, ps.segment_type, ps.title, 
+                           (embedding <+> :vector) AS distance
+                    FROM crawldb.page_segment ps
+                )
+                SELECT * FROM distances
+                ORDER BY distance ASC
+                LIMIT :limit
+            """)
+        elif metric == "inner":
+            sql = text("""
+                WITH distances AS (
+                    SELECT ps.page_id, ps.page_segment, ps.segment_type, ps.title, 
+                           -(embedding <#> :vector) AS distance
+                    FROM crawldb.page_segment ps
+                )
+                SELECT * FROM distances
+                ORDER BY distance DESC
+                LIMIT :limit
+            """)
+        else:
+            return jsonify({"error": f"Unsupported metric: {metric}"}), 400
+
+        # Execute safely with parameters
+        result = db.execute(sql, {"vector": vector_string, "limit": limit}).fetchall()
+
+        # Format results
+        formatted_results = []
+        for row in result:
+            result_entry = {
+                "page_id": row[0],
+                "segment": row[1],
+                "segment_type": row[2],
+                "title": row[3]
+            }
+            if metric == "cosine":
+                result_entry["similarity"] = float(row[4])
+            else:
+                result_entry["distance"] = float(row[4])
+            formatted_results.append(result_entry)
+
+        logger.info(f"Query returned {len(formatted_results)} results using model '{model_choice}' and metric '{metric}'")
+
+        return jsonify({"results": formatted_results})
+
+    except Exception as e:
+        logger.error(f"Error in /query: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+    finally:
+        db.close()
+
+
+
 @app.route("/pages/html", methods=["GET"])
 def get_all_html_pages():
     db = SessionLocal()
@@ -78,7 +186,7 @@ def get_all_html_pages():
             models.Page.page_type_code == 'HTML',
             models.Page.html_content.isnot(None),
             models.Page.http_status_code == 200
-        ).limit(1).all()      # Limit set for testing
+        ).limit(3).all()      # Limit set for testing
 
         pages = [
             {
@@ -109,13 +217,11 @@ def update_page():
         category = None
         published_time = None
 
-        # Only set these values if news_data is not None
+        # Parse metadata from news_data
         if news_data:
             title = news_data.get("title") if news_data.get("title") else None
             category = news_data.get("category") if news_data.get("category") else None
             time_str = news_data.get("time")
-            
-            # Convert time to timestamp if it is provided
             published_time = convert_time_to_timestamp(time_str) if time_str else None
 
         # Update the Page table
@@ -126,16 +232,26 @@ def update_page():
         page.cleaned_content = cleaned_html
         db.commit()
 
-        # Add corresponding PageSegment records
+        # DELETE existing page segments before inserting new ones
+        db.query(models.PageSegment).filter(models.PageSegment.page_id == page_id).delete()
+        db.commit()
+
+        seen_texts = set()
+
         for chunk in chunks_with_embeddings:
+            chunk_text = chunk.get("text", "").strip()
+            if not chunk_text or chunk_text in seen_texts:
+                continue  # Skip duplicates or empty
+
+            seen_texts.add(chunk_text)
+
             segment_data = {
                 "page_id": page_id,
-                "page_segment": chunk.get("text"),
+                "page_segment": chunk_text,
                 "segment_type": chunk.get("segment_type"),
                 "embedding": chunk.get("embedding")
             }
 
-            # Only add title, category, and time if they are not None or empty
             if title:
                 segment_data["title"] = title
             if category:
@@ -143,20 +259,18 @@ def update_page():
             if published_time:
                 segment_data["time"] = published_time
 
-            logger.info(f"Time is: {time_str}")
-            logger.info(f"Time2 is: {published_time}")
-            #logger.warning(f"Adding segment: {segment_data}")
             page_segment = models.PageSegment(**segment_data)
             db.add(page_segment)
 
         db.commit()
         return jsonify({"message": "Page and segments updated successfully"}), 200
     except Exception as e:
-        logger.error(f"Error in /pages/update: {e}")
+        logger.error(f"Error in /page/update: {e}")
         db.rollback()
         return jsonify({"error": str(e)}), 500
     finally:
         db.close()
+
 
 if __name__ == "__main__":
     app.run(debug=True)
