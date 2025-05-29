@@ -1,2 +1,6 @@
 fastapi 
 uvicorn[standard]
+ollama
+sentence_transformers
+sqlalchemy
+psycogp2

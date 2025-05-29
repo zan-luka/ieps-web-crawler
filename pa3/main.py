@@ -133,15 +133,14 @@ async def get_context_from_rag(question):
     logger.info(f"Query returned {formatted_results} results using LaBSE embeddings")
 
     # Return retrieved context
-    return "Retrieved context based on semantic search with LaBSE embeddings"
-
+    return "\n\n".join(entry["segment"] for entry in formatted_results)
 
 @app.post("/question", response_model=AnswerResponse)
 async def answer_question(request: QuestionRequest):
     logger.info(f"Received question: {request.question}, use_rag: {request.use_rag}")
     
     if request.use_rag:
-        context = get_context_from_rag(request.question)
+        context = await get_context_from_rag(request.question)
     else:
         context = ""
 
