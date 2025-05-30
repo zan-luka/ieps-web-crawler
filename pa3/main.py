@@ -101,7 +101,7 @@ async def get_context_from_rag(question):
     db = SessionLocal()
     question_embedding = generate_embedding(question)
 
-    limit = 5
+    limit = 3
 
     vector_string = f"[{', '.join(str(float(val)) for val in question_embedding)}]"
 
@@ -111,6 +111,11 @@ async def get_context_from_rag(question):
                                p.url, 1 - (embedding <=> :vector) AS similarity
                         FROM crawldb.page_segment ps
                         JOIN crawldb.page p ON ps.page_id = p.id
+                        WHERE p.page_type_code = 'HTML'
+                        AND p.http_status_code = '200'
+                        AND p.url LIKE '%//slo-tech.com/novice%'
+                        AND p.html_content LIKE '%<li class="categories">%'
+                        AND ps.segment_type = 'paragraph'
                     )
                     SELECT * FROM similarities
                     ORDER BY similarity DESC
