@@ -1,4 +1,3 @@
-# main.py
 from urllib import request
 from urllib.request import Request
 
@@ -69,7 +68,7 @@ def ask_ollama(instruction_prompt, input_query):
         stream=True,
     )
 
-    # print the response from the chatbot in real-time
+    # Print the response from the chatbot in real-time
     print('Chatbot response:')
     response = ''
     for chunk in stream:
